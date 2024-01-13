@@ -17,7 +17,11 @@
 #include <atomic.h>
 #endif
 
+// #include "hash.h"
+
 #define ITEMS_PER_ALLOC 64
+
+static pthread_mutex_t thread_index_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* An item in the connection queue. */
 enum conn_queue_item_modes {
@@ -356,6 +360,18 @@ static void setup_thread(LIBEVENT_THREAD *me) {
  * Worker thread: main event loop
  */
 static void *worker_libevent(void *arg) {
+
+    
+
+    pthread_mutex_lock(&thread_index_init_lock);
+    int tmp_local = (int)atomic_load(&local);
+    pthread_setspecific(key, &tmp_local);
+    printf("thread id is: %llu, used for srand, assign id is: %d\n", (unsigned long long int)pthread_self(), tmp_local);
+    thread_index[tmp_local] = pthread_self();
+    atomic_store(&local, tmp_local + 1);
+    pthread_mutex_unlock(&thread_index_init_lock);
+
+    srand((unsigned long long int)pthread_self());
     LIBEVENT_THREAD *me = arg;
 
     /* Any per-thread setup can happen here; memcached_thread_init() will block until
@@ -383,6 +399,8 @@ static void *worker_libevent(void *arg) {
  * input arrives on the libevent wakeup pipe.
  */
 static void thread_libevent_process(int fd, short which, void *arg) {
+    //    printf("thread_libevent_process function call\n");
+
     LIBEVENT_THREAD *me = arg;
     CQ_ITEM *item;
     char buf[1];
@@ -403,7 +421,8 @@ static void thread_libevent_process(int fd, short which, void *arg) {
             break;
         }
         switch (item->mode) {
-            case queue_new_conn:
+            case queue_new_conn: // init_state: conn_new_cmd
+                //    printf("will call conn_new in thread_libevent_process with state queue_new_conn\n");
                 c = conn_new(item->sfd, item->init_state, item->event_flags,
                                    item->read_buffer_size, item->transport,
                                    me->base);
@@ -455,6 +474,9 @@ static int last_thread = -1;
  */
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
                        int read_buffer_size, enum network_transport transport) {
+    
+    //    printf("dispatch_conn_new function call\n");
+
     CQ_ITEM *item = cqi_new();
     char buf[1];
     if (item == NULL) {
@@ -480,7 +502,7 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
     cq_push(thread->new_conn_queue, item);
 
     MEMCACHED_CONN_DISPATCH(sfd, thread->thread_id);
-    buf[0] = 'c';
+    buf[0] = 'c'; // a mark
     if (write(thread->notify_send_fd, buf, 1) != 1) {
         perror("Writing to thread notify pipe");
     }
@@ -533,10 +555,15 @@ void sidethread_conn_close(conn *c) {
  * Allocates a new item.
  */
 item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
+    //    printf("item_alloc function call\n");
     item *it;
-    /* do_item_alloc handles its own locks */
     it = do_item_alloc(key, nkey, flags, exptime, nbytes);
     return it;
+}
+
+struct mem_pair *item_alloc_new(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes){
+    struct mem_pair *dram_pmem = do_item_alloc_new(key, nkey, flags, exptime, nbytes);
+    return dram_pmem;
 }
 
 /*
@@ -582,6 +609,7 @@ int item_link(item *item) {
  * needed.
  */
 void item_remove(item *item) {
+    // printf("item_remove function call\n");
     uint32_t hv;
     hv = hash(ITEM_key(item), item->nkey);
 
@@ -633,12 +661,19 @@ enum delta_result_type add_delta(conn *c, const char *key,
 enum store_item_type store_item(item *item, int comm, conn* c) {
     enum store_item_type ret;
     uint32_t hv;
-
+    
+    // struct timeval start, end;
+    // gettimeofday(&start, NULL);
     hv = hash(ITEM_key(item), item->nkey);
+    // gettimeofday(&end, NULL);
+    // hash_cal = hash_cal + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+        
     item_lock(hv);
     ret = do_store_item(item, comm, c, hv);
     item_unlock(hv);
     return ret;
+
+    // return STORED;
 }
 
 /******************************* GLOBAL STATS ******************************/

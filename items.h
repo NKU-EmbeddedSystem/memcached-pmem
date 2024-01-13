@@ -21,8 +21,12 @@ uint64_t get_cas_id(void);
 
 /*@null@*/
 item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags, const rel_time_t exptime, const int nbytes);
+struct mem_pair *do_item_alloc_new(char *key, const size_t nkey, const unsigned int flags, const rel_time_t exptime, const int nbytes);
 item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain);
 item *do_item_alloc_pull(const size_t ntotal, const unsigned int id);
+
+struct mem_pair *do_item_alloc_pull_new(const size_t ntotal, const unsigned int id);
+
 void item_free(item *it);
 bool item_size_ok(const size_t nkey, const int flags, const int nbytes);
 

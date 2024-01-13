@@ -4,10 +4,13 @@
  * Licensed under the BSD-3 license. see LICENSE.Lenovo.txt for full text
  */
 #include "memcached.h"
+#include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
 #include <stdatomic.h>
 
+
+/*
 #define PSLAB_POOL_SIG "PMCH"
 #define PSLAB_POOL_SIG_SIZE 4
 #define PSLAB_POOL_VER_SIZE 12
@@ -15,14 +18,13 @@
 
 #pragma pack(1)
 
-/* persistent slab pool */
 typedef struct {
     char        signature[PSLAB_POOL_SIG_SIZE];
-    uint32_t    length; /* 8 bytes aligned */
+    uint32_t    length; 
     char        version[PSLAB_POOL_VER_SIZE];
     uint8_t     reserved;
     uint8_t     checksum[2];
-    atomic_uint_fast8_t     valid;  /* not checksumed */
+    atomic_uint_fast8_t     valid;  
 
     uint64_t    process_started;
     uint32_t    flush_time[2];
@@ -38,11 +40,11 @@ typedef struct {
 #define PSLAB_CHUNK 4
 
 typedef struct {
-    atomic_uint_fast8_t     id;
-    uint8_t     flags;       /* non-persistent */
-    uint8_t     reserved[6]; /* make slab[] 8 bytes aligned */
+    atomic_uint_fast8_t     id; // slab class id
+    uint8_t     flags;       // non-persistent
+    uint8_t     reserved[6]; // make slab[] 8 bytes aligned
     uint32_t    size;
-    uint8_t     slab[];
+    uint8_t     slab[]; // sizeof数组名, 计算的是整个数组的存储大小
 } pslab_t;
 
 #pragma pack()
@@ -65,14 +67,27 @@ typedef struct {
         _i++, (fp) = PSLAB_NEXT_FRAME(pslab_pool, (fp)))
 #define PSLAB_WALK_ID() (_i)
 #define PSLAB_WALK(fp) PSLAB_WALK_FROM((fp), NULL)
+*/
+
+
+
 
 static pslab_pool_t *pslab_pool;
 static pslab_t *pslab_start, *pslab_end;
+
+
+// lxdchange 6
+static pslab_pool_t *dslab_pool;
+static pslab_t *dslab_start, *dslab_end;
+
 
 uint64_t pslab_addr2off(void *addr) {
     return ((char *) addr >= (char *) pslab_start) ?
         (char *) addr - (char *) pslab_start : 0;
 }
+
+#define ADDR_ALIGNED(addr) (((addr) + 256 - 1) & (~255))
+
 
 #define pslab_off2addr(off) ((off) ? (void *) ((char *)pslab_start + (off)) : NULL)
 
@@ -80,23 +95,32 @@ uint64_t pslab_addr2off(void *addr) {
     (pslab_t *) ((char *)(addr) - ((char *)(addr) - (char *) pslab_start) % \
     PSLAB_FRAME_SIZE(pslab_pool)) : NULL)
 
-int pslab_contains(char *p) {
+int pslab_contains(char *p) { // lxdchange 3
     if (p >= (char *) pslab_start && p < (char *) pslab_end)
+        return 1;
+    if (p >= (char *) dslab_start && p < (char *) dslab_end)
         return 1;
     return 0;
 }
 
 void pslab_use_slab(void *p, int id, unsigned int size) {
+    ////printf("begin, pslab_use_slab\n");
     pslab_t *fp = PSLAB_SLAB2FRAME(p);
     fp->size = size;
-    pmem_member_persist(fp, size);
+    ////printf("pmem_member_persist, pslab_t size\n");
+    pmem_member_persist(fp, size); // lxdchange
+    ////printf("end pmem_member_persist, pslab_t size\n");
     atomic_store(&fp->id, id);
-    pmem_member_persist(fp, id);
+    ////printf("pmem_member_persist, pslab_t id\n");
+    pmem_member_persist(fp, id); // lxdchange
+    ////printf("end pmem_member_persist, pslab_t id\n");
+    ////printf("end, pslab_use_slab\n");
 }
 
 void *pslab_get_free_slab(void *slab) {
+    // printf("begin pslab_get_free_slab\n");
     static pslab_t *cur = NULL;
-    pslab_t *fp = PSLAB_SLAB2FRAME(slab);
+    pslab_t *fp = PSLAB_SLAB2FRAME(slab); /* dram slab 到 pmem pslab 的转换, 即包装一下 */
 
     if (fp == NULL)
         cur = fp;
@@ -105,10 +129,11 @@ void *pslab_get_free_slab(void *slab) {
     PSLAB_WALK_FROM(fp, PSLAB_NEXT_FRAME(pslab_pool, cur)) {
         if (atomic_load(&fp->id) == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0) {
             cur = fp;
-            return fp->slab;
+            return fp->slab; /* pmem pslab 到 dram slab 的转换, 即读取一下 */
         }
     }
     cur = NULL;
+    // printf("end pslab_get_free_slab\n");
     return NULL;
 }
 
@@ -149,12 +174,13 @@ static void pslab_checksum_update(int sum, int i) {
 }
 
 void pslab_update_flushtime(uint32_t time) {
+    printf("pslab_update_flushtime function call\n");
     int i = (atomic_load(&pslab_pool->valid) - 1) ^ 1;
 
     pslab_pool->flush_time[i] = time;
     pslab_checksum_update(pslab_do_checksum(&time, sizeof (time)), i);
     pmem_member_flush(pslab_pool, flush_time);
-    pmem_member_persist(pslab_pool, checksum);
+    pmem_member_persist(pslab_pool, checksum); // lxdchange
 
     atomic_store(&pslab_pool->valid, i + 1);
     pmem_member_persist(pslab_pool, valid);
@@ -172,6 +198,8 @@ time_t pslab_process_started(time_t process_started) {
 }
 
 int pslab_do_recover() {
+    // printf("pslab_do_recover function call\n");
+    // ITEM_LINKED, ITEM_CAS, ITEM_PSLAB (ITEM_CHUNK)
     pslab_t *fp;
     uint8_t *ptr;
     int i, size, perslab;
@@ -188,7 +216,7 @@ int pslab_do_recover() {
     }
 
     /* check for linked and chunked slabs and mark all chunks */
-    PSLAB_WALK(fp) {
+    PSLAB_WALK(fp) { // 以 Frame 为单位进行遍历,  Frame 是对 original memcached 中 slab_page 的进一步封装, Frame = pslab_t + slab_page
         if (atomic_load(&fp->id) == 0)
             continue;
         size = fp->size;
@@ -197,16 +225,20 @@ int pslab_do_recover() {
             item *it = (item *) ptr;
 
             if (atomic_load(&it->it_flags) & ITEM_LINKED) {
+                // printf("an item, with ITEM_LINKED");
                 if (item_is_flushed(it) ||
                         (it->exptime != 0 && it->exptime <= current_time)) {
-                    atomic_store(&it->it_flags, ITEM_PSLAB);
+                    atomic_store(&it->it_flags, ITEM_PSLAB); // 准备后续重新挂载到 PSLAB chain 中
+                    ////printf("pmem_member_persist it->it_flags in pslab_do_recover\n");
                     pmem_member_persist(it, it_flags);
+                    ////printf("end pmem_member_persist\n");
                 } else {
                     fp->flags |= PSLAB_LINKED;
                     if (atomic_load(&it->it_flags) & ITEM_CHUNKED)
                         fp->flags |= PSLAB_CHUNKED;
                 }
             } else if (atomic_load(&it->it_flags) & ITEM_CHUNK) {
+                // printf("here2\n");
                 ((item_chunk *)it)->head = NULL; /* non-persistent */
             }
         }
@@ -214,6 +246,7 @@ int pslab_do_recover() {
 
     /* relink alive chunks */
     PSLAB_WALK(fp) {
+        // printf("relink alive chunks\n");
         if (atomic_load(&fp->id) == 0 || (fp->flags & PSLAB_CHUNKED) == 0)
             continue;
 
@@ -223,6 +256,7 @@ int pslab_do_recover() {
             item *it = (item *) ptr;
 
             if ((atomic_load(&it->it_flags) & ITEM_LINKED) && (atomic_load(&it->it_flags) & ITEM_CHUNKED)) {
+                // printf("here3\n");
                 item_chunk *nch;
                 item_chunk *ch = (item_chunk *) ITEM_data(it);
                 ch->head = it;
@@ -255,12 +289,15 @@ int pslab_do_recover() {
         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
             item *it = (item *) ptr;
             if (atomic_load(&it->it_flags) & ITEM_LINKED) {
+                // printf("relink the item\n");
+                // printf("here5\n");
                 do_slab_realloc(it, id);
-                do_item_relink(it, hash(ITEM_key(it), it->nkey));
+                do_item_relink(it, hash(ITEM_key(it), it->nkey)); // PMEM 中非空闲的item, 直接重新挂载
             } else if ((atomic_load(&it->it_flags) & ITEM_CHUNK) == 0 ||
                     ((item_chunk *)it)->head == NULL) {
+                // printf("here6\n");
                 assert((atomic_load(&it->it_flags) & ITEM_CHUNKED) == 0);
-                do_slabs_free(ptr, 0, id);
+                do_slabs_free(ptr, 0, id); // PMEM 中原来的空闲部分, 还是转换成 dram 挂载到 slabclass id中
             }
         }
     }
@@ -270,15 +307,24 @@ int pslab_do_recover() {
 
 int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max,
         int slab_page_size) {
+       ////printf("begin pslab_pre_recover function call\n");
     size_t mapped_len;
     int is_pmem;
     int i;
-
+    /* lxd modification */
+       ////printf("pmem_map_file in pslab_pre_recover\n");
     if ((pslab_pool = pmem_map_file(name, 0, PMEM_FILE_EXCL,
             0, &mapped_len, &is_pmem)) == NULL) {
         fprintf(stderr, "pmem_map_file failed\n");
         return -1;
     }
+
+    int *tmp_pslab_pool = (int *)pslab_pool;
+    int addition  = *tmp_pslab_pool;
+    pslab_pool = (pslab_pool_t *)((char*)pslab_pool + addition);
+    printf("in pre_recover, the pslab_pool address is: %llu\n", (unsigned long long int)pslab_pool);
+
+
     if (!is_pmem && (pslab_force == false)) {
         fprintf(stderr, "%s is not persistent memory\n", name);
         return -1;
@@ -308,27 +354,105 @@ int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max,
 
     pslab_start = PSLAB_FIRST_FRAME(pslab_pool);
     pslab_end = (pslab_t *) ((char *) pslab_start + pslab_pool->slab_num
-       * PSLAB_FRAME_SIZE(pslab_pool));
+        * PSLAB_FRAME_SIZE(pslab_pool));
+
+    ////printf("end pslab_pre_recover function call\n");
 
     return 0;
 }
 
 bool pslab_force;
 
-int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
-        uint32_t *slabclass_sizes, int slabclass_num) {
+int pslab_create(char *pool_name, uint64_t pool_size, uint32_t slab_page_size, // settings.slab_page_size, default to 1MB page size
+        uint32_t *slabclass_sizes, int slabclass_num) { // lxdchange 4
+    
+    size_t simu_mapped_len;
+    int simu_is_pmem;
+    simu_pslab_pool_file_path = "/mnt/aep/simu_pool";
+    simu_pslab_pool_size = 32LL * 1024 * 1024 * 1024;
+    simu_aligns = 256;
+    // simu_aligns = 64;
+    assert(simu_pslab_pool_size > (1024 * 1024));
+    simu_num_chunks = (simu_pslab_pool_size - (1024 * 1024)) / simu_aligns;
 
+
+
+
+    if ((simu_pslab_pool = (char*)pmem_map_file(simu_pslab_pool_file_path, simu_pslab_pool_size,
+            PMEM_FILE_CREATE, 0666, &simu_mapped_len, &simu_is_pmem)) == NULL) {
+        fprintf(stderr, "simu_pmem_map_file failed\n");
+        return -1;
+    }
+    pmem_memset_nodrain(simu_pslab_pool, 0, simu_pslab_pool_size);
+    printf("Init simu_pslab_pool %llu\n", (unsigned long long int)simu_pslab_pool);
+    simu_pslab_pool = (char*)ADDR_ALIGNED((unsigned long long int)simu_pslab_pool);
+    printf("Alig simu_pslab_pool %llu\n", (unsigned long long int)simu_pslab_pool);
+
+    simu_dslab_pool = (char*)malloc(simu_pslab_pool_size);
+    memset(simu_dslab_pool, 0, simu_pslab_pool_size);
+    simu_dslab_pool = (char*)ADDR_ALIGNED((unsigned long long int)simu_dslab_pool);
+
+    simu_index = (unsigned long long int *)(malloc(sizeof(unsigned long long int) * 16));
+    for(int i = 0; i < 16; i++){
+        simu_index[i] = 0;
+    }
+
+
+    ////printf("begin pslab_create function\n");
+
+    ////printf("The pool_size in pslab_create is: %lu\n", pool_size);
+    ////printf("the pool name is %s, the pool_size is %lu, the slab_page_size is %u, the slabclass_num is %d\n", pool_name, pool_size, slab_page_size, slabclass_num);
     size_t mapped_len;
     int is_pmem;
     uint32_t length;
     pslab_t *fp;
     int i;
 
+    int alignment = 1; // 0 for not alignment, 1 for alignment;
+    if(alignment == 0){
+        printf("not alignment\n");
+    }
+    else{
+        printf("alignment\n");
+    }
+    
+
     if ((pslab_pool = pmem_map_file(pool_name, pool_size,
             PMEM_FILE_CREATE, 0666, &mapped_len, &is_pmem)) == NULL) {
         fprintf(stderr, "pmem_map_file failed\n");
         return -1;
     }
+    dslab_pool = (pslab_pool_t *)((char*)malloc(pool_size));
+    memset(dslab_pool, 0, pool_size);
+    // pool_start = (char*)pslab_pool;
+    printf("Init pslab_pool %llu\n", (unsigned long long int)pslab_pool);
+    printf("Init dslab_pool %llu\n", (unsigned long long int)dslab_pool);
+
+    unsigned long long int pslab_pool_addr = (unsigned long long int)pslab_pool;
+    int addition = PMEM_ALIGN - (pslab_pool_addr % PMEM_ALIGN);
+    if(alignment == 0){ addition = addition + 1; }
+    int *tmp_pslab_pool = (int *)pslab_pool;
+    *tmp_pslab_pool = addition;
+    pslab_pool = (pslab_pool_t *)((char*)pslab_pool + addition);
+    pool_size = pool_size - addition;
+
+
+    
+
+    unsigned long long int dslab_pool_addr = (unsigned long long int)dslab_pool;
+    int addition2 = PMEM_ALIGN - (dslab_pool_addr % PMEM_ALIGN);
+    if(alignment == 0){ addition2 = addition2 + 1; }
+    dslab_pool = (pslab_pool_t *)((char*)dslab_pool + addition2);
+
+    pslab_dslab_offset = (char*)(pslab_pool) - (char*)(dslab_pool);
+
+
+    printf("pslab_pool_at: %llu\n", (unsigned long long int)pslab_pool);
+    printf("dslab_pool_at: %llu\n", (unsigned long long int)dslab_pool);
+    printf("pslab_dslab_off: %llu\n", (unsigned long long int)pslab_dslab_offset);
+
+
+
     if (!is_pmem && (pslab_force == false)) {
         fprintf(stderr, "%s is not persistent memory\n", pool_name);
         return -1;
@@ -337,25 +461,40 @@ int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
     length = (sizeof (pslab_pool_t) + sizeof (pslab_pool->slabclass_sizes[0])
         * slabclass_num + 7) & PSLAB_ALIGN_MASK;
     pmem_memset_nodrain(pslab_pool, 0, length);
-
+    printf("length is: %llu\n", (unsigned long long int)length);
     (void) memcpy(pslab_pool->signature, PSLAB_POOL_SIG, PSLAB_POOL_SIG_SIZE);
     pslab_pool->length = length;
     snprintf(pslab_pool->version, PSLAB_POOL_VER_SIZE, VERSION);
     pslab_pool->slab_page_size = slab_page_size;
     pslab_pool->slab_num = (pool_size - pslab_pool->length)
         / PSLAB_FRAME_SIZE(pslab_pool);
+    
+    printf("pslab_fram_size is: %llu\n", (unsigned long long int)PSLAB_FRAME_SIZE(pslab_pool));
+    printf("pslab_t size is: %llu\n", (unsigned long long int)(sizeof(pslab_t)));
+    printf("pslab_pool slab_num is: %llu\n", (unsigned long long int)pslab_pool->slab_num);
 
     pslab_start = PSLAB_FIRST_FRAME(pslab_pool);
     pslab_end = (pslab_t *) ((char *) pslab_start + pslab_pool->slab_num
         * PSLAB_FRAME_SIZE(pslab_pool));
+    dslab_start = (pslab_t *)((char*)pslab_start - pslab_dslab_offset);
+    dslab_end   = (pslab_t *)((char*)pslab_end   - pslab_dslab_offset);
+    printf("pslab_start: %llu\n", (unsigned long long int)pslab_start);
+    printf("pslab_end: %llu\n", (unsigned long long int)pslab_end);
+    printf("dslab_start: %llu\n", (unsigned long long int)dslab_start);
+    printf("dslab_end: %llu\n", (unsigned long long int)dslab_end);
+    
 
     PSLAB_WALK(fp) {
         pmem_memset_nodrain(fp, 0, sizeof (pslab_t));
     }
+    ////printf("end pmem_memset_nodrain\n");
 
     pslab_pool->slabclass_num = slabclass_num;
     for (i = 0; i < slabclass_num; i++)
-        pslab_pool->slabclass_sizes[i] = slabclass_sizes[i];
+    {
+        pslab_pool->slabclass_sizes[i] = slabclass_sizes[i]; // slabclass_sizes 来源于 dump, dump 来源于 DRAM slab settings
+    }
+        
 
     assert(process_started != 0);
     pslab_pool->process_started = (uint64_t) process_started;
@@ -363,10 +502,17 @@ int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
     pslab_checksum_init();
     pslab_checksum_update(0, 0);
 
+    ////printf("pmem_persist pslab_pool in pslab_create\n");
     pmem_persist(pslab_pool, pslab_pool->length);
+    ////printf("end pmem_persist\n");
 
     atomic_store(&pslab_pool->valid, 1);
+    ////printf("pmem_member_persist pslab_pool->valid in pslab_create\n");
     pmem_member_persist(pslab_pool, valid);
+    ////printf("end pmem_member_persist\n");
+
+    //// end pslab_create function\n");
 
     return 0;
 }
+

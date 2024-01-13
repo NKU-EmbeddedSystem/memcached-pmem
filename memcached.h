@@ -45,6 +45,7 @@
 
 #include "sasl_defs.h"
 
+
 /** Maximum length of a key. */
 #define KEY_MAX_LENGTH 250
 
@@ -108,9 +109,15 @@
 #ifdef PSLAB
 #define SLAB_GLOBAL_PAGE_POOL_PMEM 1 /* magic slab class for storing pmem pages for reassignment */
 #endif
+// #define CHUNK_ALIGN_BYTES 1
 #define CHUNK_ALIGN_BYTES 8
+// #define CHUNK_ALIGN_BYTES 16
+// #define CHUNK_ALIGN_BYTES 64
+// #define CHUNK_ALIGN_BYTES 256    // lxdchange
 /* slab class max is a 6-bit number, -1. */
 #define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
+
+#define GROUP_THRESHOLD 16
 
 /** How long an object can reasonably be assumed to be locked before
     harvesting it on a low memory condition. Default: disabled. */
@@ -185,6 +192,100 @@ typedef void (*ADD_STAT)(const char *key, const uint16_t klen,
 /**
  * Possible states of a connection.
  */
+// lxdchange 7
+// extern long long int frame_off;
+// extern char *dslab_pool;
+// extern long long int pmem_index;
+extern long long int pslab_dslab_offset;
+// extern long long int dram_pool_size;
+// extern long long int used_slab_pages;
+// extern char *pmem_pool_start;
+// extern char *pmem_pool_end;
+// extern char *dram_pool_start;
+// extern char *dram_pool_end;
+// extern long long int threshold_slab_pages;
+// extern int groups[MAX_NUMBER_OF_SLAB_CLASSES];
+// extern char **groups_ptr[MAX_NUMBER_OF_SLAB_CLASSES][GROUP_THRESHOLD];
+// static int remain_pages[MAX_NUMBER_OF_SLAB_CLASSES];
+
+// extern char *pool_start;
+
+
+extern unsigned long long int network_io;
+extern unsigned long long int hash_cal;
+extern unsigned long long int hash_find;
+extern unsigned long long int link_time;
+extern unsigned long long int mem_access;
+extern unsigned long long int command_parse;
+extern unsigned long long int slab_alloc;
+extern unsigned long long int lru_move;
+
+
+
+struct mem_pair{
+    char *dram_ptr;
+    char *pmem_ptr;
+};
+
+
+extern unsigned long long int *simu_index;
+extern char *simu_pslab_pool;
+extern char *simu_dslab_pool;
+extern char *simu_pslab_pool_file_path;
+extern unsigned long long int simu_pslab_pool_size;
+extern unsigned long long int simu_aligns;
+extern unsigned long long int simu_num_chunks;
+// extern unsigned long long int simu_item_size;
+extern unsigned long long int simu_cycles;
+// extern int *random_array;
+
+extern unsigned long long int pmem_pool_index;
+
+struct mem_slab{
+    char *start_addr;
+    char *cur_addr;
+    unsigned long long int used_slots;
+    unsigned long long int slot_size;
+    atomic_uint_fast8_t need_flush;
+};
+
+struct pmem_slab{
+    char *cur_addr;
+    unsigned long long int used_slots;
+    unsigned long long int total_slots;
+};
+
+
+extern struct mem_slab **mem_slab_pool_1;
+extern struct mem_slab **mem_slab_pool_2;
+extern struct mem_slab **mem_slab_pool_3;
+extern struct mem_slab **mem_slab_pool_4;
+extern struct mem_slab **mem_slab_pool_5;
+extern struct mem_slab **mem_slab_pool_6;
+extern struct mem_slab **mem_slab_pool_7;
+extern struct mem_slab **mem_slab_pool_8;
+extern struct mem_slab **mem_slab_pool_9;
+extern struct mem_slab **mem_slab_pool_10;
+extern struct mem_slab **mem_slab_pool_11;
+extern struct mem_slab **mem_slab_pool_12;
+extern struct mem_slab **mem_slab_pool_13;
+extern struct mem_slab **mem_slab_pool_14;
+extern struct mem_slab **mem_slab_pool_15;
+extern struct mem_slab **mem_slab_pool_16;
+
+
+
+extern struct mem_slab **mem_slab_pool;
+extern struct pmem_slab **pmem_slab_pool;
+extern unsigned long long int *thread_index;
+extern atomic_uint_fast8_t local;
+
+extern pthread_key_t key;
+
+
+// extern char **slabclass_slots;
+
+
 enum conn_states {
     conn_listening,  /**< the socket which listens for connections */
     conn_new_cmd,    /**< Prepare connection for next command */
@@ -469,10 +570,10 @@ extern struct settings settings;
 #define ITEM_ACTIVE 16
 /* If an item's storage are chained chunks. */
 #define ITEM_CHUNKED 32
-#define ITEM_CHUNK 64
+#define ITEM_CHUNK 64            
 #ifdef PSLAB
 /* If an item is stored in pmem */
-#define ITEM_PSLAB 64
+#define ITEM_PSLAB 64     // ITEM_CHUNK and ITEM_PSLAB is conflict
 #endif
 #ifdef EXTSTORE
 /* ITEM_data bulk is external to item */
@@ -507,6 +608,7 @@ typedef struct _stritem {
     /* then " flags length\r\n" (no terminating null) */
     /* then data with terminating \r\n (no terminating null; it's binary!) */
 } item;
+
 
 // TODO: If we eventually want user loaded modules, we can't use an enum :(
 enum crawler_run_type {
@@ -739,6 +841,32 @@ extern int daemonize(int nochdir, int noclose);
 #include "hash.h"
 #include "util.h"
 
+
+
+
+/* lxd modification */
+// #define ITEM_LINKED 1
+// #define ITEM_CAS 2
+
+// /* temp */
+// #define ITEM_SLABBED 4
+
+// /* Item was fetched at least once in its lifetime */
+// #define ITEM_FETCHED 8
+// /* Appended on fetch, removed on LRU shuffling */
+// #define ITEM_ACTIVE 16
+// /* If an item's storage are chained chunks. */
+// #define ITEM_CHUNKED 32
+// #define ITEM_CHUNK 64
+// #ifdef PSLAB
+// /* If an item is stored in pmem */
+// #define ITEM_PSLAB 64
+// #endif
+// #ifdef EXTSTORE
+// /* ITEM_data bulk is external to item */
+// #define ITEM_HDR 128
+// #endif
+void print_item_stat(item* it);
 /*
  * Functions such as the libevent-related calls that need to do cross-thread
  * communication in multithreaded mode (rather than actually doing the work
@@ -760,6 +888,7 @@ conn *conn_from_freelist(void);
 bool  conn_add_to_freelist(conn *c);
 void  conn_close_idle(conn *c);
 item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+struct mem_pair *item_alloc_new(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
 #define DO_UPDATE true
 #define DONT_UPDATE false
 item *item_get(const char *key, const size_t nkey, conn *c, const bool do_update);

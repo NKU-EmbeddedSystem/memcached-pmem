@@ -187,6 +187,8 @@ static size_t item_make_header(const uint8_t nkey, const unsigned int flags, con
 }
 
 item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
+    ////printf("begin, do_item_alloc_pull\n");
+
     item *it = NULL;
     int i;
     /* If no memory is available, attempt a direct LRU juggle/eviction */
@@ -201,8 +203,9 @@ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
         if (!settings.lru_segmented) {
             lru_pull_tail(id, COLD_LRU, 0, 0, 0, NULL);
         }
-        it = slabs_alloc(ntotal, id, &total_bytes, 0);
 
+        it = slabs_alloc(ntotal, id, &total_bytes, 0); // 此处不能只申请dram，也要申请pmem才可以
+                                                    //  否则，lru机制即不发挥作用了
         if (settings.temp_lru)
             total_bytes -= temp_lru_size(id);
 
@@ -225,7 +228,76 @@ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
         pthread_mutex_unlock(&lru_locks[id]);
     }
 
+    ////printf("end, do_item_alloc_pull\n");
     return it;
+}
+
+
+
+
+struct mem_pair *do_item_alloc_pull_new(const size_t ntotal, const unsigned int id) {
+    ////printf("begin, do_item_alloc_pull\n");
+
+    item *it = NULL;
+    int i;
+    struct mem_pair *ret;
+
+    for (i = 0; i < 10; i++) {
+        uint64_t total_bytes;
+        /* Try to reclaim memory first */
+        if (!settings.lru_segmented) {
+            lru_pull_tail(id, COLD_LRU, 0, 0, 0, NULL);
+        }
+        
+        // struct timeval start, end;
+        // gettimeofday(&start, NULL);
+        ret = slabs_alloc_new(ntotal, id, &total_bytes, 0); // 此处不能只申请dram，也要申请pmem才可以
+                                                    //  否则，lru机制即不发挥作用了
+        // gettimeofday(&end, NULL);
+        // slab_alloc = slab_alloc + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+        
+
+        it = (item*)ret->pmem_ptr;
+        
+        ((item*)ret->dram_ptr)->it_flags = ITEM_PSLAB;
+        ((item*)ret->dram_ptr)->refcount = 1;
+
+        if (settings.temp_lru)
+            total_bytes -= temp_lru_size(id);
+
+        
+        if (it == NULL) {
+            // printf("do_item_alloc_pull process lru to free memory\n");
+            // gettimeofday(&start, NULL);
+            if (lru_pull_tail(id, COLD_LRU, total_bytes, LRU_PULL_EVICT, 0, NULL) <= 0) {
+                if (settings.lru_segmented) {
+                    lru_pull_tail(id, HOT_LRU, total_bytes, 0, 0, NULL);
+                } else {
+                    break;
+                }
+            }
+            // gettimeofday(&end, NULL);
+            // lru_move = lru_move + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+        } else {
+            break;
+        }
+
+    }
+
+    it = (item*)ret->pmem_ptr;
+    if(it == NULL){
+        printf("can not allocate pmem memory, exit\n");
+        exit(0);
+    }
+
+
+    if (i > 0) {
+        pthread_mutex_lock(&lru_locks[id]);
+        itemstats[id].direct_reclaims += i;
+        pthread_mutex_unlock(&lru_locks[id]);
+    }
+
+    return ret;
 }
 
 /* Chain another chunk onto this chunk. */
@@ -234,6 +306,7 @@ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
  * I think it might still not be safe to do linking outside of the slab lock
  */
 item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
+    printf("do_item_alloc_chunk function call\n");
     // TODO: Should be a cleaner way of finding real size with slabber calls
     size_t size = bytes_remain + sizeof(item_chunk);
     if (size > settings.slab_chunk_size_max)
@@ -258,11 +331,11 @@ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
 #ifdef PSLAB
     nch->next_poff = 0;
     if (ch->head->it_flags & ITEM_PSLAB) {
-        pmem_member_flush(nch, it_flags);
+        // pmem_member_flush(nch, it_flags);
 
         ch->next_poff = pslab_addr2off((char *)ch->next);
-        pmem_member_flush(ch, next_poff);
-        pmem_member_flush(nch, next_poff);
+        // pmem_member_flush(ch, next_poff);
+        // pmem_member_flush(nch, next_poff);
         /* will be drained by the following LINKED persist */
     } else {
         ch->next_poff = 0;
@@ -272,8 +345,11 @@ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
     return nch;
 }
 
-item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
+item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,    // 核心操作, 控制内存的核心操作
                     const rel_time_t exptime, const int nbytes) {
+    
+    ////printf("begin do_item_alloc function\n");
+
     uint8_t nsuffix;
     item *it = NULL;
     char suffix[40];
@@ -282,11 +358,13 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         return 0;
 
     size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
+
     if (settings.use_cas) {
         ntotal += sizeof(uint64_t);
     }
 
     unsigned int id = slabs_clsid(ntotal);
+
     unsigned int hdr_id = 0;
     if (id == 0)
         return 0;
@@ -294,11 +372,14 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
     /* This is a large item. Allocate a header object now, lazily allocate
      *  chunks while reading the upload.
      */
+    
+    //    printf("the settings.slab_chun_size_max is %d\n", (int)settings.slab_chunk_size_max);
     if (ntotal > settings.slab_chunk_size_max) {
         /* We still link this item into the LRU for the larger slab class, but
          * we're pulling a header from an entirely different slab class. The
          * free routines handle large items specifically.
          */
+        //    printf("will call do_item_alloc_pull in do_item_alloc with ntotal>settings.slab_chunk_size_max\n");
         int htotal = nkey + 1 + nsuffix + sizeof(item) + sizeof(item_chunk);
         if (settings.use_cas) {
             htotal += sizeof(uint64_t);
@@ -306,11 +387,23 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         hdr_id = slabs_clsid(htotal);
         it = do_item_alloc_pull(htotal, hdr_id);
         /* setting ITEM_CHUNKED is fine here because we aren't LINKED yet. */
+        //    printf("ITEM Stat in do_item_alloc 1\n");
+        //#print_item_stat(it);
         if (it != NULL)
-            atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_CHUNKED);
+            atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_CHUNKED); // 1 setting ITEM_CHUNKED is here
+           ////printf("ITEM Stat in do_item_alloc 2\n");
+        //#print_item_stat(it);
     } else {
+        //    printf("will call do_item_alloc_pull in do_item_alloc\n");
+        // it = do_item_alloc_pull(ntotal, id);
+
         it = do_item_alloc_pull(ntotal, id);
+        //    printf("Item Stat in do_item_alloc 3\n");
+        //#print_item_stat(it);
     }
+
+    //    printf("Item Stat in do_item_alloc 3\n");
+    //#print_item_stat(it);
 
     if (it == NULL) {
         pthread_mutex_lock(&lru_locks[id]);
@@ -318,6 +411,9 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         pthread_mutex_unlock(&lru_locks[id]);
         return NULL;
     }
+
+    //    printf("Item Stat in do_item_alloc 3\n");
+        //#print_item_stat(it);
 
     assert(it->slabs_clsid == 0);
     //assert(it != heads[id]);
@@ -338,9 +434,16 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         id |= COLD_LRU;
     }
     it->slabs_clsid = id;
+    //    printf("Item Stat in do_item_alloc 3\n");
+        //#print_item_stat(it);
+    
 
     DEBUG_REFCNT(it, '*');
-    atomic_store(&it->it_flags, atomic_load(&it->it_flags) | settings.use_cas ? ITEM_CAS : 0);
+    atomic_store(&it->it_flags, atomic_load(&it->it_flags) | (settings.use_cas ? ITEM_CAS : 0)); // setting ITEM_CAS is here
+
+    //    printf("Item Stat in do_item_alloc 4\n");
+    //#print_item_stat(it);
+
     it->nkey = nkey;
     it->nbytes = nbytes;
     memcpy(ITEM_key(it), key, nkey);
@@ -354,6 +457,8 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
 
     /* Initialize internal chunk. */
     if (atomic_load(&it->it_flags) & ITEM_CHUNKED) {
+        printf("error in do_item_alloc\n");
+        ////printf("Initialia internal chunk in do_item_alloc function\n");
         item_chunk *chunk = (item_chunk *) ITEM_data(it);
 
         chunk->next = 0;
@@ -365,19 +470,146 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
 #ifdef PSLAB
         chunk->next_poff = 0;
         if (atomic_load(&it->it_flags) & ITEM_PSLAB)
-            pmem_member_flush(chunk, next_poff);
+            pmem_member_flush(chunk, next_poff); // lxdchange
 #endif
     }
+    
     it->h_next = 0;
+
 #ifdef PSLAB
     if (atomic_load(&it->it_flags) & ITEM_PSLAB)
-        pmem_flush_from(it, item, time);
+    {
+        //printf("pmem_flush it->time\n");
+        pmem_flush_from(it, item, time); // lxdchange
+        //printf("end pmem_flush it->time\n");
+    }
+        
 #endif
 
     return it;
 }
 
+
+struct mem_pair *do_item_alloc_new(char *key, const size_t nkey, const unsigned int flags, const rel_time_t exptime, const int nbytes){
+
+    uint8_t nsuffix;
+    item *it = NULL;
+    struct mem_pair * dram_pmem;
+    char suffix[40];
+    if (nbytes < 2)
+        return 0;
+
+    size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
+
+    if (settings.use_cas) {
+        ntotal += sizeof(uint64_t);
+    }
+
+    unsigned int id = slabs_clsid(ntotal);
+    // if(id < 13){
+    //     // printf("id is 12, change to 13\n");
+    //     id = 13;
+    // }
+
+    unsigned int hdr_id = 0;
+    if (id == 0)
+        return 0;
+    
+
+    dram_pmem = do_item_alloc_pull_new(ntotal, id);
+
+    if (dram_pmem->pmem_ptr == NULL) {
+        pthread_mutex_lock(&lru_locks[id]);
+        itemstats[id].outofmemory++;
+        pthread_mutex_unlock(&lru_locks[id]);
+        return NULL;
+    }
+
+    // struct timeval start, end;
+    // gettimeofday(&start, NULL);
+    it = (item*)(dram_pmem->dram_ptr);
+
+    assert(it->slabs_clsid == 0);
+    //assert(it != heads[id]);
+
+    /* Refcount is seeded to 1 by slabs_alloc() */
+    it->next = it->prev = 0;
+
+    /* Items are initially loaded into the HOT_LRU. This is '0' but I want at
+     * least a note here. Compiler (hopefully?) optimizes this out.
+     */
+    if (settings.temp_lru &&
+            exptime - current_time <= settings.temporary_ttl) {
+        id |= TEMP_LRU;
+    } else if (settings.lru_segmented) {
+        id |= HOT_LRU;
+    } else {
+        /* There is only COLD in compat-mode */
+        id |= COLD_LRU;
+    }
+    it->slabs_clsid = id;
+    //    printf("Item Stat in do_item_alloc 3\n");
+        //#print_item_stat(it);
+    
+
+    DEBUG_REFCNT(it, '*');
+    atomic_store(&it->it_flags, atomic_load(&it->it_flags) | (settings.use_cas ? ITEM_CAS : 0)); // setting ITEM_CAS is here
+
+
+    it->nkey = nkey;
+    it->nbytes = nbytes;
+    memcpy(ITEM_key(it), key, nkey);
+    it->exptime = exptime;
+    if (settings.inline_ascii_response) {
+        memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
+    } else if (nsuffix > 0) {
+        memcpy(ITEM_suffix(it), &flags, sizeof(flags));
+    }
+    it->nsuffix = nsuffix;
+
+    /* Initialize internal chunk. */
+    if (atomic_load(&it->it_flags) & ITEM_CHUNKED) {
+        printf("error in do_item_alloc\n");
+        ////printf("Initialia internal chunk in do_item_alloc function\n");
+        item_chunk *chunk = (item_chunk *) ITEM_data(it);
+
+        chunk->next = 0;
+        chunk->prev = 0;
+        chunk->used = 0;
+        chunk->size = 0;
+        chunk->head = it;
+        chunk->orig_clsid = hdr_id;
+#ifdef PSLAB
+        chunk->next_poff = 0;
+        if (atomic_load(&it->it_flags) & ITEM_PSLAB)
+            pmem_member_flush(chunk, next_poff); // lxdchange
+#endif
+    }
+    
+    it->h_next = 0;
+
+#ifdef PSLAB
+    if (atomic_load(&it->it_flags) & ITEM_PSLAB)
+    {
+        //printf("pmem_flush it->time\n");
+        // pmem_flush_from(it, item, time); // lxdchange
+        //printf("end pmem_flush it->time\n");
+    }
+        
+#endif
+    // gettimeofday(&end, NULL);
+    // mem_access = mem_access + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+        
+    return dram_pmem;
+}
+
+
+
+
+
+
 void item_free(item *it) {
+    // printf("item_free function call\n");
     size_t ntotal = ITEM_ntotal(it);
     unsigned int clsid;
     assert((atomic_load(&it->it_flags) & ITEM_LINKED) == 0);
@@ -508,18 +740,34 @@ void do_item_relink(item *it, uint32_t hv) {
 #endif
 
 int do_item_link(item *it, const uint32_t hv) {
+    // printf("do_item_link function call, the linked item address is %llu\n", (unsigned long long int)it);
+    
+    ////printf("Item Stat in do_item_link function head\n");
+    ////print_item_stat(it);
+
     MEMCACHED_ITEM_LINK(ITEM_key(it), it->nkey, it->nbytes);
+
+/* lxdchange */
     assert((atomic_load(&it->it_flags) & (ITEM_LINKED|ITEM_SLABBED)) == 0);
 #ifdef PSLAB
     if (atomic_load(&it->it_flags) & ITEM_PSLAB) {
         if ((atomic_load(&it->it_flags) & ITEM_CHUNKED) == 0)
-            pslab_item_data_flush(it);
-        pmem_drain();
+        {
+            //printf("will call pslab_item_data_flush in do_item_link\n");
+            //printf("cancel item data flush in do_item_link\n");
+            // pslab_item_data_flush(it);
+        }
+        
+        //printf("pmem_drain in do_item_link\n");
+        // pmem_drain();      // lxdchange
+        //printf("end pmem_drain\n");
 
+        // printf("pmem_member_persist it_flags and time\n");
         atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
-        pmem_member_persist(it, it_flags);
+        pmem_member_persist(it, it_flags); // lxdchange
         it->time = current_time;
-        pmem_member_persist(it, time);
+        pmem_member_persist(it, time); // lxdchange
+        //printf("end pmem_member_persist it_flags and time\n");
     } else {
 #endif
         atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
@@ -527,6 +775,7 @@ int do_item_link(item *it, const uint32_t hv) {
 #ifdef PSLAB
     }
 #endif
+
 
     STATS_LOCK();
     stats_state.curr_bytes += ITEM_ntotal(it);
@@ -536,21 +785,29 @@ int do_item_link(item *it, const uint32_t hv) {
 
     /* Allocate a new CAS ID on link. */
     ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+    // printf("begin assoc_insert, item_linkq, refcount_incr, item_stats_size_add function\n");
     assoc_insert(it, hv);
     item_link_q(it);
     refcount_incr(it);
     item_stats_sizes_add(it);
+    // printf("end assoc_insert, item_linkq, refcount_incr, item_stats_size_add function\n");
+
+    ////printf("Item Stat in the final of do_item_link function: \n");
+    ////print_item_stat(it);
+
+    ////printf("end do_item_link function\n");
 
     return 1;
 }
 
 void do_item_unlink(item *it, const uint32_t hv) {
+    // printf("do_item_unlink function call, the unlinked item address is %llu\n", (unsigned long long int)it);
     MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
     if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
         atomic_store(&it->it_flags, atomic_load(&it->it_flags) & ~ITEM_LINKED);
 #ifdef PSLAB
         if (atomic_load(&it->it_flags) & ITEM_PSLAB)
-            pmem_member_persist(it, it_flags);
+            pmem_member_persist(it, it_flags); // lxdchange
 #endif
         STATS_LOCK();
         stats_state.curr_bytes -= ITEM_ntotal(it);
@@ -565,12 +822,13 @@ void do_item_unlink(item *it, const uint32_t hv) {
 
 /* FIXME: Is it necessary to keep this copy/pasted code? */
 void do_item_unlink_nolock(item *it, const uint32_t hv) {
+       ////printf("do_item_unlink_nolock function call\n");
     MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
     if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
 #ifdef PSLAB
         if (atomic_load(&it->it_flags) & ITEM_PSLAB)
-            pmem_member_persist(it, it_flags);
+            pmem_member_persist(it, it_flags); // lxdchange
 #endif
         STATS_LOCK();
         stats_state.curr_bytes -= ITEM_ntotal(it);
@@ -584,10 +842,11 @@ void do_item_unlink_nolock(item *it, const uint32_t hv) {
 }
 
 void do_item_remove(item *it) {
+    // printf("do_item_remove function call\n");
     MEMCACHED_ITEM_REMOVE(ITEM_key(it), it->nkey, it->nbytes);
     assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
     assert(it->refcount > 0);
-
+    // printf("it->refcount is: %llu\n", (unsigned long long int)it->refcount);
     if (refcount_decr(it) == 0) {
         item_free(it);
     }
@@ -596,6 +855,7 @@ void do_item_remove(item *it) {
 /* Copy/paste to avoid adding two extra branches for all common calls, since
  * _nolock is only used in an uncommon case where we want to relink. */
 void do_item_update_nolock(item *it) {
+       ////printf("do_item_update_nolock function call\n");
     MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
@@ -605,7 +865,7 @@ void do_item_update_nolock(item *it) {
             it->time = current_time;
 #ifdef PSLAB
             if (atomic_load(&it->it_flags) & ITEM_PSLAB)
-                pmem_member_persist(it, time);
+                pmem_member_persist(it, time); // lxdchange
 #endif
             do_item_link_q(it);
         }
@@ -1003,7 +1263,9 @@ void item_stats_sizes(ADD_STAT add_stats, void *c) {
         int i;
         for (i = 0; i < stats_sizes_buckets; i++) {
             if (stats_sizes_hist[i] != 0) {
-                char key[8];
+                /* lxd modification */
+                // char key[8];
+                char key[12];
                 snprintf(key, sizeof(key), "%d", i * 32);
                 APPEND_STAT(key, "%u", stats_sizes_hist[i]);
             }
