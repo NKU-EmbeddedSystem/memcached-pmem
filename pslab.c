@@ -4,6 +4,8 @@
  * Licensed under the BSD-3 license. see LICENSE.Lenovo.txt for full text
  */
 #include "memcached.h"
+#include <libpmem.h>
+#include <omp.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -389,7 +391,13 @@ int pslab_create(char *pool_name, uint64_t pool_size,
     fprintf(stderr, "simu_pmem_map_file failed\n");
     return -1;
   }
-  pmem_memset_nodrain(simu_pslab_pool, 0, simu_pslab_pool_size);
+  assert(simu_pslab_pool_size % 16 == 0);
+  size_t perthread_simu_size = simu_pslab_pool_size / 16;
+#pragma omp parallel for num_threads(16)
+  for (int i = 0; i < 16; ++i) {
+    pmem_memset_persist(simu_pslab_pool + perthread_simu_size * i, 0,
+                        perthread_simu_size);
+  }
   printf("Init simu_pslab_pool %llu\n",
          (unsigned long long int)simu_pslab_pool);
   simu_pslab_pool =
@@ -458,7 +466,10 @@ int pslab_create(char *pool_name, uint64_t pool_size,
   length = (sizeof(pslab_pool_t) +
             sizeof(pslab_pool->slabclass_sizes[0]) * slabclass_num + 7) &
            PSLAB_ALIGN_MASK;
-  pmem_memset_nodrain(pslab_pool, 0, length);
+  size_t perthread_length = length / 16;
+#pragma omp parallel for num_threads(16)
+  for (int i = 0; i < 16; ++i)
+    pmem_memset_persist(pslab_pool + perthread_length * i, 0, perthread_length);
   printf("length is: %llu\n", (unsigned long long int)length);
   (void)memcpy(pslab_pool->signature, PSLAB_POOL_SIG, PSLAB_POOL_SIG_SIZE);
   pslab_pool->length = length;
