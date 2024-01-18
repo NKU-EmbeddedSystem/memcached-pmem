@@ -1,6 +1,7 @@
 /* fast-enough functions for uriencoding strings. */
 void uriencode_init(void);
-bool uriencode(const char *src, char *dst, const size_t srclen, const size_t dstlen);
+bool uriencode(const char *src, char *dst, const size_t srclen,
+               const size_t dstlen);
 
 /*
  * Wrappers around strtoull/strtoll that are safer and easier to
@@ -23,9 +24,9 @@ extern uint64_t ntohll(uint64_t);
 #endif
 
 #ifdef __GCC
-# define __gcc_attribute__ __attribute__
+#define __gcc_attribute__ __attribute__
 #else
-# define __gcc_attribute__(x)
+#define __gcc_attribute__(x)
 #endif
 
 /**
@@ -34,5 +35,4 @@ extern uint64_t ntohll(uint64_t);
  *
  * @param fmt a printf format
  */
-void vperror(const char *fmt, ...)
-    __gcc_attribute__ ((format (printf, 1, 2)));
+void vperror(const char *fmt, ...) __gcc_attribute__((format(printf, 1, 2)));

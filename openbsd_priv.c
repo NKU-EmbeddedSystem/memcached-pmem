@@ -1,9 +1,9 @@
+#include "memcached.h"
 #include <errno.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "memcached.h"
 
 /*
  * this section of code will drop all (OpenBSD) privileges including
@@ -12,17 +12,17 @@
  * to fork(), exec(), etc.  See pledge(2) for more information.
  */
 void drop_privileges() {
-    extern char *__progname;
+  extern char *__progname;
 
-    if (settings.socketpath != NULL) {
-       if (pledge("stdio unix", NULL) == -1) {
-          fprintf(stderr, "%s: pledge: %s\n", __progname, strerror(errno));
-          exit(EXIT_FAILURE);
-       }
-    } else {
-       if (pledge("stdio inet", NULL) == -1) {
-          fprintf(stderr, "%s: pledge: %s\n", __progname, strerror(errno));
-          exit(EXIT_FAILURE);
-       }
-     }
+  if (settings.socketpath != NULL) {
+    if (pledge("stdio unix", NULL) == -1) {
+      fprintf(stderr, "%s: pledge: %s\n", __progname, strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+  } else {
+    if (pledge("stdio inet", NULL) == -1) {
+      fprintf(stderr, "%s: pledge: %s\n", __progname, strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+  }
 }

@@ -18,7 +18,8 @@
     3rd argument specifies if the slab allocator should allocate all memory
     up front (if true), or allocate memory in chunks as it is needed (if false)
 */
-void slabs_init(const size_t limit, const double factor, const bool prealloc, const uint32_t *slab_sizes);
+void slabs_init(const size_t limit, const double factor, const bool prealloc,
+                const uint32_t *slab_sizes);
 
 /** Call only during init. Pre-allocates all available memory */
 void slabs_prefill_global(void);
@@ -26,7 +27,7 @@ void slabs_prefill_global(void);
 #ifdef PSLAB
 int get_slabclass_chunksize(void *item_ptr);
 int get_slabclass_chunknums(void *item_ptr);
-void* get_slabclass_slabpage_ptr(void *item_ptr);
+void *get_slabclass_slabpage_ptr(void *item_ptr);
 int get_slabclass_perslab(int id);
 int slabs_dump_sizes(uint32_t *slab_sizes, int max);
 void slabs_prefill_global_from_pmem(void);
@@ -36,13 +37,14 @@ void do_slab_realloc(item *it, unsigned int id);
 void do_slabs_free(void *ptr, const size_t size, unsigned int id);
 #endif
 
-void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, unsigned long long int slots_nums);
+void flush_to_optane_pm(void *ptr, int id, unsigned long long int size,
+                        unsigned long long int slots_nums);
 
 void *get_pmem_page(unsigned int id);
 
-struct mem_pair{
-    char *dram_ptr;
-    char *pmem_ptr;
+struct mem_pair {
+  char *dram_ptr;
+  char *pmem_ptr;
 };
 
 /**
@@ -54,9 +56,11 @@ unsigned int slabs_clsid(const size_t size);
 
 /** Allocate object of given length. 0 on error */ /*@null@*/
 #define SLABS_ALLOC_NO_NEWPAGE 1
-void *slabs_alloc(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
+void *slabs_alloc(const size_t size, unsigned int id, uint64_t *total_bytes,
+                  unsigned int flags);
 
-// struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
+// struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t
+// *total_bytes, unsigned int flags);
 
 /** Free previously allocated object */
 void slabs_free(void *ptr, size_t size, unsigned int id);
@@ -71,10 +75,10 @@ bool slabs_adjust_mem_limit(size_t new_mem_limit);
 bool get_stats(const char *stat_type, int nkey, ADD_STAT add_stats, void *c);
 
 typedef struct {
-    unsigned int chunks_per_page;
-    unsigned int chunk_size;
-    long int free_chunks;
-    long int total_pages;
+  unsigned int chunks_per_page;
+  unsigned int chunk_size;
+  long int free_chunks;
+  long int total_pages;
 } slab_stats_automove;
 void fill_slab_stats_automove(slab_stats_automove *am);
 unsigned int global_page_pool_size(bool *mem_flag);
@@ -83,7 +87,9 @@ unsigned int global_page_pool_size(bool *mem_flag);
 void slabs_stats(ADD_STAT add_stats, void *c);
 
 /* Hints as to freespace in slab class */
-unsigned int slabs_available_chunks(unsigned int id, bool *mem_flag, uint64_t *total_bytes, unsigned int *chunks_perslab);
+unsigned int slabs_available_chunks(unsigned int id, bool *mem_flag,
+                                    uint64_t *total_bytes,
+                                    unsigned int *chunks_perslab);
 
 void slabs_mlock(void);
 void slabs_munlock(void);
@@ -92,8 +98,11 @@ int start_slab_maintenance_thread(void);
 void stop_slab_maintenance_thread(void);
 
 enum reassign_result_type {
-    REASSIGN_OK=0, REASSIGN_RUNNING, REASSIGN_BADCLASS, REASSIGN_NOSPARE,
-    REASSIGN_SRC_DST_SAME
+  REASSIGN_OK = 0,
+  REASSIGN_RUNNING,
+  REASSIGN_BADCLASS,
+  REASSIGN_NOSPARE,
+  REASSIGN_SRC_DST_SAME
 };
 
 enum reassign_result_type slabs_reassign(int src, int dst);
