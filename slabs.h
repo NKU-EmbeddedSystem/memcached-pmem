@@ -24,6 +24,10 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc, co
 void slabs_prefill_global(void);
 
 #ifdef PSLAB
+int get_slabclass_chunksize(void *item_ptr);
+int get_slabclass_chunknums(void *item_ptr);
+void* get_slabclass_slabpage_ptr(void *item_ptr);
+int get_slabclass_perslab(int id);
 int slabs_dump_sizes(uint32_t *slab_sizes, int max);
 void slabs_prefill_global_from_pmem(void);
 void slabs_update_policy(void);
@@ -31,6 +35,15 @@ int do_slabs_renewslab(const unsigned int id, char *ptr);
 void do_slab_realloc(item *it, unsigned int id);
 void do_slabs_free(void *ptr, const size_t size, unsigned int id);
 #endif
+
+void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, unsigned long long int slots_nums);
+
+void *get_pmem_page(unsigned int id);
+
+struct mem_pair{
+    char *dram_ptr;
+    char *pmem_ptr;
+};
 
 /**
  * Given object size, return id to use when allocating/freeing memory for object
@@ -42,6 +55,8 @@ unsigned int slabs_clsid(const size_t size);
 /** Allocate object of given length. 0 on error */ /*@null@*/
 #define SLABS_ALLOC_NO_NEWPAGE 1
 void *slabs_alloc(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
+
+// struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
 
 /** Free previously allocated object */
 void slabs_free(void *ptr, size_t size, unsigned int id);

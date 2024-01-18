@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include <signal.h>
 #include <assert.h>
@@ -70,6 +71,7 @@ static void *storage  = NULL;
  * Access to the slab allocator is protected by this lock
  */
 static pthread_mutex_t slabs_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t slabs_lock_copy = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t slabs_rebalance_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
@@ -118,6 +120,9 @@ unsigned int slabs_clsid(const size_t size) {
  * accordingly.
  */
 void slabs_init(const size_t limit, const double factor, const bool prealloc, const uint32_t *slab_sizes) {
+
+    ////printf("slabs_init function call, memory limit is %d, increase factor is %f, prealloc is %d\n", (int)limit, factor, prealloc);
+
     int i = POWER_SMALLEST - 1;
     unsigned int size = sizeof(item) + settings.chunk_size;
 
@@ -182,7 +187,44 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc, co
 }
 
 #ifdef PSLAB
+int get_slabclass_perslab(int id){
+    return slabclass[id].perslab;
+}
+
+int get_slabclass_chunksize(void *item_ptr){
+    assert(item_ptr != NULL);
+    item *cur_item = (item*)item_ptr;
+    size_t slabclassid = cur_item->slabs_clsid;
+    size_t slabclass_chunksize = slabclass[slabclassid].size;
+
+    return slabclass_chunksize;
+}
+
+int get_slabclass_chunknums(void *item_ptr){
+    assert(item_ptr != NULL);
+    item *cur_item = (item*)item_ptr;
+    size_t slabclassid = cur_item->slabs_clsid;
+    size_t slabclass_perslab = slabclass[slabclassid].perslab;
+
+    return slabclass_perslab;
+}
+void* get_slabclass_slabpage_ptr(void *item_ptr){
+    assert(item_ptr != NULL);
+    item *cur_item = (item*)item_ptr;
+    size_t slabclassid = cur_item->slabs_clsid;
+    slabclass_t *p = &slabclass[slabclassid];
+    unsigned int num_slabs = p->slabs;
+
+    return (void*)(p->slab_list[num_slabs-1]);
+}
+
+
+
+
 int slabs_dump_sizes(uint32_t *slab_sizes, int max) {
+       ////printf("slab_dump_sizes function call, to copy slabclass size to pslab slabclass size\n");
+    ////printf("power largest is: %d\n", power_largest);
+    ////printf("power largest is: %d\n", POWER_SMALLEST);
     int num = power_largest + 1 - POWER_SMALLEST;
     slabclass_t *p = &slabclass[POWER_SMALLEST];
 
@@ -197,6 +239,7 @@ int slabs_dump_sizes(uint32_t *slab_sizes, int max) {
 #endif
 
 void slabs_prefill_global(void) {
+    /* 使用 pre_allocate 的内存持续填充 slabclass[0] */
     void *ptr;
     slabclass_t *p = &slabclass[0];
     int len = settings.slab_page_size;
@@ -211,13 +254,21 @@ void slabs_prefill_global(void) {
 
 #ifdef PSLAB
 void slabs_prefill_global_from_pmem(void) {
+       ////printf("begin slabs_prefill_global_from_pmem\n");
     void *ptr = NULL;
-    slabclass_t *p = &slabclass[SLAB_GLOBAL_PAGE_POOL_PMEM];
+    slabclass_t *p = &slabclass[SLAB_GLOBAL_PAGE_POOL_PMEM]; /* equals 1 */
 
-    while ((ptr = pslab_get_free_slab(ptr)) != NULL) {
+    int count = 0;
+
+    while ((ptr = pslab_get_free_slab(ptr)) != NULL) { // 获取到的 slab 位于 pmem 的 pslab->slab 中, 即可按照 dram slab 进行管理
+        count++;
         grow_slab_list(SLAB_GLOBAL_PAGE_POOL_PMEM);
         p->slab_list[p->slabs++] = ptr;
     }
+
+    ////printf("call pslab_get_free_slab for %d times\n", count);
+
+    ////printf("end slabs_prefill_global_from_pmem\n");
 }
 #endif
 
@@ -243,7 +294,7 @@ static void slabs_preallocate (const unsigned int maxslabs) {
     }
 }
 
-static int grow_slab_list (const unsigned int id) {
+static int grow_slab_list (const unsigned int id) { /* id is slab_class_id */
     slabclass_t *p = &slabclass[id];
     if (p->slabs == p->list_size) {
         size_t new_size =  (p->list_size != 0) ? p->list_size * 2 : 16;
@@ -255,13 +306,17 @@ static int grow_slab_list (const unsigned int id) {
     return 1;
 }
 
-static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
+static void split_slab_page_into_freelist(char *ptr, const unsigned int id) { // lxdchange 1
+    // printf("split_slab_page_into_freelist function call, call many times (slabclass_t->perslab) of do_slabs_free function\n");
+    
     slabclass_t *p = &slabclass[id];
     int x;
     for (x = 0; x < p->perslab; x++) {
-        do_slabs_free(ptr, 0, id);
+        // printf("when calling do_slabs_free, the ptr is %llu\n", (unsigned long long int)ptr);
+        do_slabs_free(ptr, 0, id); // 调用 do_slabs_free
         ptr += p->size;
     }
+
 }
 
 #ifdef PSLAB
@@ -269,6 +324,8 @@ static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
     get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL)
 
 static void *get_page_from_global_pool_by_id(const unsigned int id) {
+       ////printf("begin get_page_from_global_pool_by_id function\n");
+
     slabclass_t *p = &slabclass[id];
     assert((id == SLAB_GLOBAL_PAGE_POOL) || (id == SLAB_GLOBAL_PAGE_POOL_PMEM));
 #else
@@ -277,18 +334,99 @@ static void *get_page_from_global_pool(void) {
     slabclass_t *p = &slabclass[SLAB_GLOBAL_PAGE_POOL];
 #endif
     if (p->slabs < 1) {
+           ////printf("There is no free slabs in global_page_pool, return!\n");
         return NULL;
     }
     char *ret = p->slab_list[p->slabs - 1];
     p->slabs--;
+       ////printf("Successfully get free slab pages in global_page_pool, return!\n");
+
+       ////printf("end get_page_from_global_pool_by_id function\n");
     return ret;
 }
+
+
+
+void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, unsigned long long int slots_sizes){
+    char *pm_ptr = get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL_PMEM);
+    pmem_memcpy_persist(pm_ptr, (char*)ptr, slots_sizes);
+    pslab_use_slab(pm_ptr, id, size);
+}
+
+void *get_pmem_page(unsigned int id){
+    // printf("get pmem page function call\n");
+
+    int cls_id = id- 2;
+    unsigned long long int size = mem_slab_pool[cls_id]->slot_size;
+    unsigned long long int cached_size = settings.slab_page_size / size;
+    // unsigned long long int cached_size = 1024;
+    // unsigned long long int cached_size = 1;
+
+    pthread_mutex_lock(&slabs_lock_copy);
+
+
+    if(pmem_slab_pool[cls_id]->cur_addr == NULL || (pmem_slab_pool[cls_id]->used_slots + cached_size > pmem_slab_pool[cls_id]->total_slots)){
+
+        slabclass_t *p = &slabclass[SLAB_GLOBAL_PAGE_POOL_PMEM];
+        if (p->slabs < 1) {
+            /*
+            printf("p->slabs: %d\n", (int)p->slabs);
+            printf("the pmem slab page is not enough\n");
+            size_t reassign = slabs_reassign(cls_id, SLAB_GLOBAL_PAGE_POOL_PMEM);
+            switch(reassign){
+                case REASSIGN_OK:
+                    printf("reassign ok\n");
+                    break;
+                case REASSIGN_RUNNING:
+                    printf("reassign running\n");
+                    break;
+                case REASSIGN_BADCLASS:
+                    printf("reassign bad class\n");
+                    break;
+                case REASSIGN_NOSPARE:
+                    printf("reassign nospare\n");
+                    break;
+                case REASSIGN_SRC_DST_SAME:
+                    printf("reassign src dst same\n");
+                    break;
+                default:
+                    printf("reassign default\n");
+            }
+            */
+            printf("p->slabs: %d, no more slab pages\n", (int)p->slabs);
+            pthread_mutex_unlock(&slabs_lock_copy);
+            return NULL;
+        }
+
+        // int res = grow_slab_list(id);
+        // if(res == 0){ printf("grow slab list error\n"); }
+        // slabclass_t *cur_p = &slabclass[id];
+        // cur_p->slab_list[p->slabs++] = p->slab_list[p->slabs - 1];
+
+        pmem_slab_pool[cls_id]->cur_addr   = p->slab_list[p->slabs - 1];
+        pmem_slab_pool[cls_id]->used_slots = 0;
+        p->slabs--;
+
+        // printf("the pmem_slab_pool addr is: %llu\n", (unsigned long long int)pmem_slab_pool[cls_id]->cur_addr);
+    }
+
+    char *ret = pmem_slab_pool[cls_id]->cur_addr;
+    pmem_slab_pool[cls_id]->cur_addr   = pmem_slab_pool[cls_id]->cur_addr + cached_size * slabclass[id].size;
+    pmem_slab_pool[cls_id]->used_slots = pmem_slab_pool[cls_id]->used_slots + cached_size;
+
+    pthread_mutex_unlock(&slabs_lock_copy);
+    // printf("get pmem page function call over\n");
+    return ret;
+}
+
+
 
 #ifdef PSLAB
 static int do_slabs_newslab_from_dram(const unsigned int id) {
 #else
 static int do_slabs_newslab(const unsigned int id) {
 #endif
+       ////printf("do_slabs_new_slab(_from_dram) function call\n");
     slabclass_t *p = &slabclass[id];
     slabclass_t *g = &slabclass[SLAB_GLOBAL_PAGE_POOL];
     int len = (settings.slab_reassign || settings.slab_chunk_size_max != settings.slab_page_size)
@@ -298,6 +436,7 @@ static int do_slabs_newslab(const unsigned int id) {
 
     if ((mem_limit == 0) || (mem_malloced + len > mem_limit && p->slabs > 0
          && g->slabs == 0)) {
+           ////printf("do_slabs_newslab(from_dram) return due to mem_limit reached\n");
         mem_limit_reached = true;
         MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
         return 0;
@@ -329,23 +468,55 @@ int do_slabs_renewslab(const unsigned int id, char *ptr) {
     return 1;
 }
 
-static int do_slabs_newslab_from_pmem(const unsigned int id) {
+static int do_slabs_newslab_from_pmem(const unsigned int id) { // 核心操作
+    
+    // printf("begin, do_slabs_newslab function\n");
+
+    /* 简单从 SLAB_GLOBAL_PAGE_POOL_PMEM 这一大的持久内存池中摘取内存 */
+
     slabclass_t *p = &slabclass[id];
     char *ptr;
 
+
+    // char *d_addr = p->slab_list[p->slabs-1];
+    // char *p_addr = (char*)d_addr + pslab_dslab_offset; 
+    // pmem_memcpy_persist((char*)p_addr, (char*)d_addr, p->size * p->perslab);
+
+
     if ((grow_slab_list(id) == 0) ||
-        ((ptr = get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL_PMEM))
+        ((ptr = get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL_PMEM)) // 只是返回之前预分配的一个地址 
         == NULL)) {
-//        MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
+       MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
+           ////printf("Can not get free memory space from pmem global page pool!\n");
         return 0;
     }
 
-    pmem_memset_persist(ptr, 0, settings.slab_page_size);
-    split_slab_page_into_freelist(ptr, id);
+    // unsigned long long int offset = (char*)ptr - (char*)pool_start;
+    // printf("offset is: %llu, is it can be divided by 256 %llu\n", offset, offset%256);
+
+    // printf("ptr is: %llu, is it can be divided by 256 %llu\n", ((unsigned long long int)ptr), ((unsigned long long int)ptr)%256);
+    // if(pslab_contains(ptr)){ printf("ptr is in pmem\n"); }
+    ////printf("pmem_memset_persist settings.slab_page_size\n");
+    pmem_memset_persist(ptr, 0, settings.slab_page_size); // 持久化一整个 slab_page // // 得到的仍然是 PMEM 的指针 // 核心操作
+    ////printf("end pmem_memset_persist settings.slab_page_size\n");
+
+    // PMEM 到 DRAM 的转换
+    split_slab_page_into_freelist(ptr, id); // 由此开始挂载到 slabclass 中
+// #ifdef PSLAB
+//     char *dram_ptr = ptr - pslab_dslab_offset; // lxdchange // 由此开始挂载到 slabclass 中
+//     p->slab_list[p->slabs++] = dram_ptr;
+//     // printf("pmem link slab page: %llu\n", (unsigned long long int)dram_ptr);
+// #else
+//     p->slab_list[p->slabs++] = ptr;
+// #endif
 
     p->slab_list[p->slabs++] = ptr;
-//    MEMCACHED_SLABS_SLABCLASS_ALLOCATE(id);
-    pslab_use_slab(ptr, id, p->size);
+    // pslab_use_slab(dram_ptr, id, p->size);
+    pslab_use_slab(ptr, id, p->size); // lxdchange
+
+
+    MEMCACHED_SLABS_SLABCLASS_ALLOCATE(id);
+    ////printf("end, do_slabs_newslab function\n");
 
     return 1;
 }
@@ -356,23 +527,43 @@ static int (*newslabs_funcs[])(const unsigned int) = {
 };
 
 static int slabs_next_src;
-void slabs_update_policy() {
+void slabs_update_policy() { /* 控制使用哪一块内存 */
+    ////printf("begin slabs_update_policy\n");
     if (settings.pslab_size == 0)
+    {
+           ////printf("slabs next src is: DRAM\n");
         slabs_next_src = PSLAB_POLICY_DRAM;
+    }
     else if (mem_limit == 0)
+    {
+           ////printf("slabs next src is PMEM\n");
         slabs_next_src = PSLAB_POLICY_PMEM;
+    }
     if (settings.pslab_policy == PSLAB_POLICY_BALANCED)
+    {
+           ////printf(", slabs next src is DRAM\n");
         slabs_next_src = PSLAB_POLICY_DRAM;
+    }
     else
+    {
         slabs_next_src = settings.pslab_policy;
+    }   
+    ////printf("end slabs_update_policy\n");
 }
 
-static int do_slabs_newslab(const unsigned int id) {
+static int do_slabs_newslab(const unsigned int id) { // 会对持久内存做改动, 在 spilt 的时候, 调用 do_slabs_free() 函数
+       ////printf("do_slabs_newslab function call\n");
     int src = slabs_next_src;
     int ret;
 
+    // if(slabs_next_src == PSLAB_POLICY_DRAM){ printf("slabs_next_src==0, choose dram\n"); }
+    // else if(slabs_next_src == PSLAB_POLICY_PMEM){ printf("slabs_next_src==1, choose pmem\n"); }
+
+    // if(src == 0){ printf("src==0, choose dram\n"); }
+    // else if(src == 1){ printf("src==1, choose pmem\n"); }
+
     if ((ret = newslabs_funcs[src](id)) == 0) {
-        src ^= 1;
+        src ^= 1; /* 异或运算符 */
         ret = newslabs_funcs[src](id);
     }
 
@@ -385,6 +576,8 @@ static int do_slabs_newslab(const unsigned int id) {
 /*@null@*/
 static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_bytes,
         unsigned int flags) {
+    
+    ////printf("begin,  do_slabs_alloc function\n");
     slabclass_t *p;
     void *ret = NULL;
     item *it = NULL;
@@ -403,16 +596,17 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
     /* fail unless we have space at the end of a recently allocated page,
        we have something on our freelist, or we could allocate a new page */
     if (p->sl_curr == 0 && flags != SLABS_ALLOC_NO_NEWPAGE) {
-        do_slabs_newslab(id);
+        do_slabs_newslab(id); /* 如果是持久内存，就包含了持久化的操作 */ // 已经完成了内存地址转换
     }
 
     if (p->sl_curr != 0) {
-        /* return off our freelist */
         it = (item *)p->slots;
+        // printf("the item address in do_slabs_alloc is %llu\n", (unsigned long long int)it);
+        // printf("After call do_slabs_newslab, Item Stat in do_slabs_alloc\n");
+        // print_item_stat(it);
+
         p->slots = it->next;
         if (it->next) it->next->prev = 0;
-        /* Kill flag and initialize refcount here for lock safety in slab
-         * mover's freeness detection. */
         it->it_flags &= ~ITEM_SLABBED;
         it->refcount = 1;
         p->sl_curr--;
@@ -421,17 +615,25 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
         ret = NULL;
     }
 
+
     if (ret) {
         p->requested += size;
         MEMCACHED_SLABS_ALLOCATE(size, id, p->size, ret);
     } else {
         MEMCACHED_SLABS_ALLOCATE_FAILED(size, id);
     }
+    
+
+    ////printf("At the end of do_slabs_alloc, Item Stat in do_slabs_alloc\n");
+    ////print_item_stat((item*)ret);
+
+    ////printf("end,  do_slabs_alloc function\n");
 
     return ret;
 }
 
 void do_slab_realloc(item *it, unsigned int id) {
+    ////printf("do_slab_realloc function call\n");
     slabclass_t *p = &slabclass[id];
 
     assert(it->it_flags & ITEM_LINKED);
@@ -455,13 +657,16 @@ void do_slab_realloc(item *it, unsigned int id) {
 }
 
 static void do_slabs_free_chunked(item *it, const size_t size) {
+
+    printf("do_slabs_free_chunked function call\n");
+
     item_chunk *chunk = (item_chunk *) ITEM_data(it);
     slabclass_t *p;
 
 #ifdef PSLAB
     if (it->it_flags & ITEM_PSLAB) {
         it->it_flags = ITEM_SLABBED | ITEM_PSLAB;
-        pmem_member_persist(it, it_flags);
+        // pmem_member_persist(it, it_flags); // lxdchange
     } else
 #endif
     it->it_flags = ITEM_SLABBED;
@@ -521,29 +726,44 @@ static void do_slabs_free_chunked(item *it, const size_t size) {
 #ifndef PSLAB
 static
 #endif
-void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
+void do_slabs_free(void *ptr, const size_t size, unsigned int id) { // lxdchange 2
+    // printf("do_slabs_free function call\n");
+    //#print_item_stat((item*)ptr);
+
     slabclass_t *p;
     item *it;
 
     assert(id >= POWER_SMALLEST && id <= power_largest);
     if (id < POWER_SMALLEST || id > power_largest)
         return;
-
+    
     MEMCACHED_SLABS_FREE(size, id, ptr);
     p = &slabclass[id];
+
+// #ifdef PSLAB
+//         char *dram_ptr = (char *)ptr - pslab_dslab_offset;
+//         it = (item *)dram_ptr;
+// #else
+//     it = (item *)ptr;
+// #endif
 
     it = (item *)ptr;
     if ((it->it_flags & ITEM_CHUNKED) == 0) {
 #ifdef EXTSTORE
         bool is_hdr = it->it_flags & ITEM_HDR;
 #endif
-        it->it_flags = ITEM_SLABBED;
+        it->it_flags = ITEM_SLABBED; // setting ITEM_SLABBED is here
 #ifdef PSLAB
-        if (pslab_contains((char *)it)) {
-            it->it_flags |= ITEM_PSLAB;
+        if (pslab_contains((char *)it)) { // 核心操作, 判断申请到的内存空间是否处于 PMEM 
+            // printf("pslab_contains\n");
+            it->it_flags |= ITEM_PSLAB; // serring ITEM_PSLAB is here
             /* no persist since non-linked items can always be reclaimed */
         }
 #endif
+// 
+        //    printf("in do_slabs_free function\n");
+        //#print_item_stat(it);
+
         it->slabs_clsid = 0;
         it->prev = 0;
         it->next = p->slots;
@@ -561,6 +781,8 @@ void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
         p->requested -= size;
 #endif
     } else {
+        printf("the address is %llu\n", (unsigned long long int)it);
+        printf("get error due to the chunked free\n");
         do_slabs_free_chunked(it, size);
     }
     return;
@@ -741,13 +963,95 @@ static void memory_release() {
 
 void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
         unsigned int flags) {
+    // printf("slabs_alloc function call\n");
     void *ret;
 
-    pthread_mutex_lock(&slabs_lock);
-    ret = do_slabs_alloc(size, id, total_bytes, flags);
-    pthread_mutex_unlock(&slabs_lock);
+    int cls_id = id - 2;
+    unsigned long long int cached_size = settings.slab_page_size / size;
+    // unsigned long long int cached_size =1024;
+    // unsigned long long int cached_size = 1;
+
+    int thread_id = *((int*)pthread_getspecific(key));
+
+    struct mem_slab **cur_mem_slab;
+    switch(thread_id){
+        case 0:
+            cur_mem_slab = mem_slab_pool_1;
+            break;
+        case 1:
+            cur_mem_slab = mem_slab_pool_2;
+            break;
+        case 2:
+            cur_mem_slab = mem_slab_pool_3;
+            break;
+        case 3:
+            cur_mem_slab = mem_slab_pool_4;
+            break;
+        case 4:
+            cur_mem_slab = mem_slab_pool_5;
+            break;
+        case 5:
+            cur_mem_slab = mem_slab_pool_6;
+            break;
+        case 6:
+            cur_mem_slab = mem_slab_pool_7;
+            break;
+        case 7:
+            cur_mem_slab = mem_slab_pool_8;
+            break;
+        case 8:
+            cur_mem_slab = mem_slab_pool_9;
+            break;
+        case 9:
+            cur_mem_slab = mem_slab_pool_10;
+            break;
+        case 10:
+            cur_mem_slab = mem_slab_pool_11;
+            break;
+        case 11:
+            cur_mem_slab = mem_slab_pool_12;
+            break;
+        case 12:
+            cur_mem_slab = mem_slab_pool_13;
+            break;
+        case 13:
+            cur_mem_slab = mem_slab_pool_14;
+            break;
+        case 14:
+            cur_mem_slab = mem_slab_pool_15;
+            break;
+        case 15:
+            cur_mem_slab = mem_slab_pool_16;
+            break;
+        default:
+            cur_mem_slab = mem_slab_pool;
+            break;
+    }
+
+    // pthread_mutex_lock(&slabs_lock);
+    // ret = do_slabs_alloc(size, id, total_bytes, flags);
+
+    ret = cur_mem_slab[cls_id]->cur_addr;
+    cur_mem_slab[cls_id]->cur_addr   = cur_mem_slab[cls_id]->cur_addr + cur_mem_slab[cls_id]->slot_size;
+    cur_mem_slab[cls_id]->used_slots = cur_mem_slab[cls_id]->used_slots + 1;
+
+    
+    if(cur_mem_slab[cls_id]->used_slots == cached_size){
+        cur_mem_slab[cls_id]->cur_addr   = cur_mem_slab[cls_id]->start_addr;
+        cur_mem_slab[cls_id]->used_slots = 0;
+    }
+
+
+    // pthread_mutex_unlock(&slabs_lock);
     return ret;
 }
+
+
+
+
+
+
+
 
 void slabs_free(void *ptr, size_t size, unsigned int id) {
     pthread_mutex_lock(&slabs_lock);
@@ -1211,6 +1515,7 @@ static int slab_rebalance_move(void) {
 }
 
 static void slab_rebalance_finish(void) {
+       ////printf("slab_rebalance_finish function call\n");
     slabclass_t *s_cls;
     slabclass_t *d_cls;
     int x;
@@ -1376,10 +1681,10 @@ static enum reassign_result_type do_slabs_reassign(int src, int dst) {
         dst < SLAB_GLOBAL_PAGE_POOL || dst > power_largest)
         return REASSIGN_BADCLASS;
 
-    pthread_mutex_lock(&slabs_lock);
-    if (slabclass[src].slabs < 2)
-        nospare = true;
-    pthread_mutex_unlock(&slabs_lock);
+    // pthread_mutex_lock(&slabs_lock);
+    // if (slabclass[src].slabs < 2)
+    //     nospare = true;
+    // pthread_mutex_unlock(&slabs_lock);
     if (nospare)
         return REASSIGN_NOSPARE;
 
