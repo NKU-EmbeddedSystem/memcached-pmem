@@ -219,7 +219,7 @@ void *get_slabclass_slabpage_ptr(void *item_ptr) {
 
 int slabs_dump_sizes(uint32_t *slab_sizes, int max) {
   ////printf("slab_dump_sizes function call, to copy slabclass size to pslab
-  ///slabclass size\n");
+  /// slabclass size\n");
   ////printf("power largest is: %d\n", power_largest);
   ////printf("power largest is: %d\n", POWER_SMALLEST);
   int num = power_largest + 1 - POWER_SMALLEST;
@@ -599,7 +599,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id,
      we have something on our freelist, or we could allocate a new page */
   if (p->sl_curr == 0 && flags != SLABS_ALLOC_NO_NEWPAGE) {
     do_slabs_newslab(id);
-        /* 如果是持久内存，就包含了持久化的操作 */ // 已经完成了内存地址转换
+    /* 如果是持久内存，就包含了持久化的操作 */ // 已经完成了内存地址转换
   }
 
   if (p->sl_curr != 0) {

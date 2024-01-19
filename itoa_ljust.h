@@ -20,9 +20,9 @@
 
 #include <stdint.h>
 
-char* itoa_u32(uint32_t u, char* buffer);
-char* itoa_32( int32_t i, char* buffer);
-char* itoa_u64(uint64_t u, char* buffer);
-char* itoa_64( int64_t i, char* buffer);
+char *itoa_u32(uint32_t u, char *buffer);
+char *itoa_32(int32_t i, char *buffer);
+char *itoa_u64(uint64_t u, char *buffer);
+char *itoa_64(int64_t i, char *buffer);
 
 #endif // ITOA_LJUST_H
