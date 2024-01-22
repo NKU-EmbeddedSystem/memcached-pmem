@@ -376,7 +376,7 @@ int pslab_create(char *pool_name, uint64_t pool_size,
                  uint32_t slab_page_size, // settings.slab_page_size, default to
                                           // 1MB page size
                  uint32_t *slabclass_sizes, int slabclass_num) { // lxdchange 4
-
+#if false
   size_t simu_mapped_len;
   int simu_is_pmem;
   simu_pslab_pool_file_path = "/mnt/aep/simu_pool";
@@ -404,7 +404,7 @@ int pslab_create(char *pool_name, uint64_t pool_size,
       (char *)ADDR_ALIGNED((unsigned long long int)simu_pslab_pool);
   printf("Alig simu_pslab_pool %llu\n",
          (unsigned long long int)simu_pslab_pool);
-
+#endif
   ////printf("begin pslab_create function\n");
 
   ////printf("The pool_size in pslab_create is: %lu\n", pool_size);

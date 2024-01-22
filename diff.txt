@@ -1,0 +1,3148 @@
+--- a/hash.c
++++ b/hash.c
+@@ -4,6 +4,9 @@
+ #include "jenkins_hash.h"
+ #include "murmur3_hash.h"
+ 
++/* lxd modification */
++hash_func hash;
++
+ int hash_init(enum hashfunc_type type) {
+     switch(type) {
+         case JENKINS_HASH:
+diff --git a/hash.h b/hash.h
+index 059d1e2..96b88f9 100755
+--- a/hash.h
++++ b/hash.h
+@@ -2,7 +2,8 @@
+ #define    HASH_H
+ 
+ typedef uint32_t (*hash_func)(const void *key, size_t length);
+-hash_func hash;
++/* lxd modification */
++extern hash_func hash;
+ 
+ enum hashfunc_type {
+     JENKINS_HASH=0, MURMUR3_HASH
+diff --git a/items.c b/items.c
+index fdfdeed..6b82c96 100755
+--- a/items.c
++++ b/items.c
+@@ -187,6 +187,8 @@ static size_t item_make_header(const uint8_t nkey, const unsigned int flags, con
+ }
+ 
+ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
++    ////printf("begin, do_item_alloc_pull\n");
++
+     item *it = NULL;
+     int i;
+     /* If no memory is available, attempt a direct LRU juggle/eviction */
+@@ -201,12 +203,18 @@ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
+         if (!settings.lru_segmented) {
+             lru_pull_tail(id, COLD_LRU, 0, 0, 0, NULL);
+         }
+-        it = slabs_alloc(ntotal, id, &total_bytes, 0);
++
++        it = slabs_alloc(ntotal, id, &total_bytes, 0); // 此处不能只申请dram，也要申请pmem才可以
++                                                    //  否则，lru机制即不发挥作用了
++
++        it->it_flags = ITEM_PSLAB;
++        it->refcount = 1;
+ 
+         if (settings.temp_lru)
+             total_bytes -= temp_lru_size(id);
+ 
+         if (it == NULL) {
++            printf("do_item_alloc_pull error\n");
+             if (lru_pull_tail(id, COLD_LRU, total_bytes, LRU_PULL_EVICT, 0, NULL) <= 0) {
+                 if (settings.lru_segmented) {
+                     lru_pull_tail(id, HOT_LRU, total_bytes, 0, 0, NULL);
+@@ -225,6 +233,7 @@ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
+         pthread_mutex_unlock(&lru_locks[id]);
+     }
+ 
++    ////printf("end, do_item_alloc_pull\n");
+     return it;
+ }
+ 
+@@ -234,6 +243,7 @@ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
+  * I think it might still not be safe to do linking outside of the slab lock
+  */
+ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
++    printf("do_item_alloc_chunk function call\n");
+     // TODO: Should be a cleaner way of finding real size with slabber calls
+     size_t size = bytes_remain + sizeof(item_chunk);
+     if (size > settings.slab_chunk_size_max)
+@@ -258,11 +268,11 @@ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
+ #ifdef PSLAB
+     nch->next_poff = 0;
+     if (ch->head->it_flags & ITEM_PSLAB) {
+-        pmem_member_flush(nch, it_flags);
++        // pmem_member_flush(nch, it_flags);
+ 
+         ch->next_poff = pslab_addr2off((char *)ch->next);
+-        pmem_member_flush(ch, next_poff);
+-        pmem_member_flush(nch, next_poff);
++        // pmem_member_flush(ch, next_poff);
++        // pmem_member_flush(nch, next_poff);
+         /* will be drained by the following LINKED persist */
+     } else {
+         ch->next_poff = 0;
+@@ -272,8 +282,11 @@ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
+     return nch;
+ }
+ 
+-item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
++item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,    // 核心操作, 控制内存的核心操作
+                     const rel_time_t exptime, const int nbytes) {
++    
++    ////printf("begin do_item_alloc function\n");
++
+     uint8_t nsuffix;
+     item *it = NULL;
+     char suffix[40];
+@@ -282,11 +295,15 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
+         return 0;
+ 
+     size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
++
+     if (settings.use_cas) {
+         ntotal += sizeof(uint64_t);
+     }
+ 
+     unsigned int id = slabs_clsid(ntotal);
++
++    // printf("slabclass id is: %llu\n", (unsigned long long int)id);
++
+     unsigned int hdr_id = 0;
+     if (id == 0)
+         return 0;
+@@ -294,11 +311,14 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
+     /* This is a large item. Allocate a header object now, lazily allocate
+      *  chunks while reading the upload.
+      */
++    
++    //    printf("the settings.slab_chun_size_max is %d\n", (int)settings.slab_chunk_size_max);
+     if (ntotal > settings.slab_chunk_size_max) {
+         /* We still link this item into the LRU for the larger slab class, but
+          * we're pulling a header from an entirely different slab class. The
+          * free routines handle large items specifically.
+          */
++        //    printf("will call do_item_alloc_pull in do_item_alloc with ntotal>settings.slab_chunk_size_max\n");
+         int htotal = nkey + 1 + nsuffix + sizeof(item) + sizeof(item_chunk);
+         if (settings.use_cas) {
+             htotal += sizeof(uint64_t);
+@@ -306,12 +326,22 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
+         hdr_id = slabs_clsid(htotal);
+         it = do_item_alloc_pull(htotal, hdr_id);
+         /* setting ITEM_CHUNKED is fine here because we aren't LINKED yet. */
++        //    printf("ITEM Stat in do_item_alloc 1\n");
++        //#print_item_stat(it);
+         if (it != NULL)
+-            atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_CHUNKED);
++            atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_CHUNKED); // 1 setting ITEM_CHUNKED is here
++           ////printf("ITEM Stat in do_item_alloc 2\n");
++        //#print_item_stat(it);
+     } else {
++        //    printf("will call do_item_alloc_pull in do_item_alloc\n");
+         it = do_item_alloc_pull(ntotal, id);
++        //    printf("Item Stat in do_item_alloc 3\n");
++        //#print_item_stat(it);
+     }
+ 
++    //    printf("Item Stat in do_item_alloc 3\n");
++    //#print_item_stat(it);
++
+     if (it == NULL) {
+         pthread_mutex_lock(&lru_locks[id]);
+         itemstats[id].outofmemory++;
+@@ -319,6 +349,9 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
+         return NULL;
+     }
+ 
++    //    printf("Item Stat in do_item_alloc 3\n");
++        //#print_item_stat(it);
++
+     assert(it->slabs_clsid == 0);
+     //assert(it != heads[id]);
+ 
+@@ -338,9 +371,16 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
+         id |= COLD_LRU;
+     }
+     it->slabs_clsid = id;
++    //    printf("Item Stat in do_item_alloc 3\n");
++        //#print_item_stat(it);
++    
+ 
+     DEBUG_REFCNT(it, '*');
+-    atomic_store(&it->it_flags, atomic_load(&it->it_flags) | settings.use_cas ? ITEM_CAS : 0);
++    atomic_store(&it->it_flags, atomic_load(&it->it_flags) | (settings.use_cas ? ITEM_CAS : 0)); // setting ITEM_CAS is here
++
++    //    printf("Item Stat in do_item_alloc 4\n");
++    //#print_item_stat(it);
++
+     it->nkey = nkey;
+     it->nbytes = nbytes;
+     memcpy(ITEM_key(it), key, nkey);
+@@ -354,6 +394,8 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
+ 
+     /* Initialize internal chunk. */
+     if (atomic_load(&it->it_flags) & ITEM_CHUNKED) {
++        printf("error in do_item_alloc\n");
++        ////printf("Initialia internal chunk in do_item_alloc function\n");
+         item_chunk *chunk = (item_chunk *) ITEM_data(it);
+ 
+         chunk->next = 0;
+@@ -365,19 +407,27 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
+ #ifdef PSLAB
+         chunk->next_poff = 0;
+         if (atomic_load(&it->it_flags) & ITEM_PSLAB)
+-            pmem_member_flush(chunk, next_poff);
++            pmem_member_flush(chunk, next_poff); // lxdchange
+ #endif
+     }
++    
+     it->h_next = 0;
++
+ #ifdef PSLAB
+     if (atomic_load(&it->it_flags) & ITEM_PSLAB)
+-        pmem_flush_from(it, item, time);
++    {
++        //printf("pmem_flush it->time\n");
++        pmem_flush_from(it, item, time); // lxdchange
++        //printf("end pmem_flush it->time\n");
++    }
++        
+ #endif
+ 
+     return it;
+ }
+ 
+ void item_free(item *it) {
++    // printf("item_free function call\n");
+     size_t ntotal = ITEM_ntotal(it);
+     unsigned int clsid;
+     assert((atomic_load(&it->it_flags) & ITEM_LINKED) == 0);
+@@ -508,18 +558,34 @@ void do_item_relink(item *it, uint32_t hv) {
+ #endif
+ 
+ int do_item_link(item *it, const uint32_t hv) {
++    // printf("do_item_link function call, the linked item address is %llu\n", (unsigned long long int)it);
++    
++    ////printf("Item Stat in do_item_link function head\n");
++    ////print_item_stat(it);
++
+     MEMCACHED_ITEM_LINK(ITEM_key(it), it->nkey, it->nbytes);
++
++/* lxdchange */
+     assert((atomic_load(&it->it_flags) & (ITEM_LINKED|ITEM_SLABBED)) == 0);
+ #ifdef PSLAB
+     if (atomic_load(&it->it_flags) & ITEM_PSLAB) {
+         if ((atomic_load(&it->it_flags) & ITEM_CHUNKED) == 0)
+-            pslab_item_data_flush(it);
+-        pmem_drain();
++        {
++            //printf("will call pslab_item_data_flush in do_item_link\n");
++            //printf("cancel item data flush in do_item_link\n");
++            // pslab_item_data_flush(it);
++        }
++        
++        //printf("pmem_drain in do_item_link\n");
++        // pmem_drain();      // lxdchange
++        //printf("end pmem_drain\n");
+ 
++        // printf("pmem_member_persist it_flags and time\n");
+         atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
+-        pmem_member_persist(it, it_flags);
++        pmem_member_persist(it, it_flags); // lxdchange
+         it->time = current_time;
+-        pmem_member_persist(it, time);
++        pmem_member_persist(it, time); // lxdchange
++        //printf("end pmem_member_persist it_flags and time\n");
+     } else {
+ #endif
+         atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
+@@ -528,6 +594,7 @@ int do_item_link(item *it, const uint32_t hv) {
+     }
+ #endif
+ 
++
+     STATS_LOCK();
+     stats_state.curr_bytes += ITEM_ntotal(it);
+     stats_state.curr_items += 1;
+@@ -536,21 +603,29 @@ int do_item_link(item *it, const uint32_t hv) {
+ 
+     /* Allocate a new CAS ID on link. */
+     ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
++    // printf("begin assoc_insert, item_linkq, refcount_incr, item_stats_size_add function\n");
+     assoc_insert(it, hv);
+-    item_link_q(it);
++    // item_link_q(it);
+     refcount_incr(it);
+     item_stats_sizes_add(it);
++    // printf("end assoc_insert, item_linkq, refcount_incr, item_stats_size_add function\n");
++
++    ////printf("Item Stat in the final of do_item_link function: \n");
++    ////print_item_stat(it);
++
++    ////printf("end do_item_link function\n");
+ 
+     return 1;
+ }
+ 
+ void do_item_unlink(item *it, const uint32_t hv) {
++    // printf("do_item_unlink function call, the unlinked item address is %llu\n", (unsigned long long int)it);
+     MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
+     if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
+         atomic_store(&it->it_flags, atomic_load(&it->it_flags) & ~ITEM_LINKED);
+ #ifdef PSLAB
+         if (atomic_load(&it->it_flags) & ITEM_PSLAB)
+-            pmem_member_persist(it, it_flags);
++            pmem_member_persist(it, it_flags); // lxdchange
+ #endif
+         STATS_LOCK();
+         stats_state.curr_bytes -= ITEM_ntotal(it);
+@@ -565,12 +640,13 @@ void do_item_unlink(item *it, const uint32_t hv) {
+ 
+ /* FIXME: Is it necessary to keep this copy/pasted code? */
+ void do_item_unlink_nolock(item *it, const uint32_t hv) {
++       ////printf("do_item_unlink_nolock function call\n");
+     MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
+     if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
+         it->it_flags &= ~ITEM_LINKED;
+ #ifdef PSLAB
+         if (atomic_load(&it->it_flags) & ITEM_PSLAB)
+-            pmem_member_persist(it, it_flags);
++            pmem_member_persist(it, it_flags); // lxdchange
+ #endif
+         STATS_LOCK();
+         stats_state.curr_bytes -= ITEM_ntotal(it);
+@@ -584,10 +660,11 @@ void do_item_unlink_nolock(item *it, const uint32_t hv) {
+ }
+ 
+ void do_item_remove(item *it) {
++    // printf("do_item_remove function call\n");
+     MEMCACHED_ITEM_REMOVE(ITEM_key(it), it->nkey, it->nbytes);
+     assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
+     assert(it->refcount > 0);
+-
++    // printf("it->refcount is: %llu\n", (unsigned long long int)it->refcount);
+     if (refcount_decr(it) == 0) {
+         item_free(it);
+     }
+@@ -596,6 +673,7 @@ void do_item_remove(item *it) {
+ /* Copy/paste to avoid adding two extra branches for all common calls, since
+  * _nolock is only used in an uncommon case where we want to relink. */
+ void do_item_update_nolock(item *it) {
++       ////printf("do_item_update_nolock function call\n");
+     MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
+     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
+         assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
+@@ -605,7 +683,7 @@ void do_item_update_nolock(item *it) {
+             it->time = current_time;
+ #ifdef PSLAB
+             if (atomic_load(&it->it_flags) & ITEM_PSLAB)
+-                pmem_member_persist(it, time);
++                pmem_member_persist(it, time); // lxdchange
+ #endif
+             do_item_link_q(it);
+         }
+@@ -1003,7 +1081,9 @@ void item_stats_sizes(ADD_STAT add_stats, void *c) {
+         int i;
+         for (i = 0; i < stats_sizes_buckets; i++) {
+             if (stats_sizes_hist[i] != 0) {
+-                char key[8];
++                /* lxd modification */
++                // char key[8];
++                char key[12];
+                 snprintf(key, sizeof(key), "%d", i * 32);
+                 APPEND_STAT(key, "%u", stats_sizes_hist[i]);
+             }
+diff --git a/memcached.c b/memcached.c
+index f66a738..f106e78 100755
+--- a/memcached.c
++++ b/memcached.c
+@@ -80,6 +80,67 @@
+ /*
+  * forward declarations
+  */
++
++// lxdchange 8
++// char *dslab_pool;
++// long long int frame_off;
++// long long int pmem_index;
++long long int pslab_dslab_offset;
++// long long int used_slab_pages;
++// // long long int dram_pool_size;
++// char *pmem_pool_start;
++// char *pmem_pool_end;
++// char *dram_pool_start;
++// char *dram_pool_end;
++// long long int threshold_slab_pages;
++// int groups[MAX_NUMBER_OF_SLAB_CLASSES];
++// char **groups_ptr[MAX_NUMBER_OF_SLAB_CLASSES][GROUP_THRESHOLD];
++
++// char *pool_start;
++
++char *simu_pslab_pool;
++char *simu_pslab_pool_file_path;
++unsigned long long int simu_pslab_pool_size;
++unsigned long long int simu_aligns;
++unsigned long long int simu_num_chunks;
++// unsigned long long int simu_item_size;
++unsigned long long int simu_cycles;
++// int *random_array;
++
++unsigned long long int pmem_pool_index;
++
++
++struct mem_slab **mem_slab_pool_1;
++struct mem_slab **mem_slab_pool_2;
++struct mem_slab **mem_slab_pool_3;
++struct mem_slab **mem_slab_pool_4;
++struct mem_slab **mem_slab_pool_5;
++struct mem_slab **mem_slab_pool_6;
++struct mem_slab **mem_slab_pool_7;
++struct mem_slab **mem_slab_pool_8;
++struct mem_slab **mem_slab_pool_9;
++struct mem_slab **mem_slab_pool_10;
++struct mem_slab **mem_slab_pool_11;
++struct mem_slab **mem_slab_pool_12;
++struct mem_slab **mem_slab_pool_13;
++struct mem_slab **mem_slab_pool_14;
++struct mem_slab **mem_slab_pool_15;
++struct mem_slab **mem_slab_pool_16;
++
++
++
++
++
++
++struct mem_slab **mem_slab_pool;
++struct pmem_slab **pmem_slab_pool;
++unsigned long long int *thread_index;
++atomic_uint_fast8_t local;
++// static pthread_mutex_t slabs_lock = PTHREAD_MUTEX_INITIALIZER;
++
++pthread_key_t key;
++
++
+ static void drive_machine(conn *c);
+ static int new_socket(struct addrinfo *ai);
+ static int try_read_command(conn *c);
+@@ -158,6 +219,30 @@ enum transmit_result {
+ 
+ static enum transmit_result transmit(conn *c);
+ 
++
++
++void print_item_stat(item* it){
++    if(it == NULL){ printf("Item State: NULLPTR\n"); return; }
++    printf("Item Stat: ");
++    if(atomic_load(&it->it_flags) & ITEM_LINKED){ printf("ITEM_LINKED, "); }
++    if(atomic_load(&it->it_flags) & ITEM_CAS){ printf("ITEM_CAS, "); }
++    if(atomic_load(&it->it_flags) & ITEM_SLABBED){ printf("ITEM_SLABBED, "); }
++    if(atomic_load(&it->it_flags) & ITEM_FETCHED){ printf("ITEM_FETCHED, "); }
++    if(atomic_load(&it->it_flags) & ITEM_ACTIVE){ printf("ITEM_ACTIVE, "); }
++    if(atomic_load(&it->it_flags) & ITEM_CHUNKED){ printf("ITEM_CHUNKED, "); }
++    if(atomic_load(&it->it_flags) & ITEM_CHUNK){ printf("ITEM_CHUNK, "); }
++    #ifdef PSLAB
++        if(atomic_load(&it->it_flags) & ITEM_PSLAB){ printf("ITEM_PSLAB, "); }
++    #endif
++
++    #ifdef EXTSTORE
++        if(atomic_load(&it->it_flags) & ITEM_HDR){ printf("ITEM_HDR, "); }
++    #endif
++    printf("\n");
++}
++
++
++
+ /* This reduces the latency without adding lots of extra wiring to be able to
+  * notify the listener thread of when to listen again.
+  * Also, the clock timer could be broken out into its own thread and we
+@@ -246,7 +331,9 @@ static void settings_init(void) {
+     settings.oldest_cas = 0;          /* supplements accuracy of oldest_live */
+     settings.evict_to_free = 1;       /* push old items out of cache when memory runs out */
+     settings.socketpath = NULL;       /* by default, not using a unix socket */
+-    settings.factor = 1.25;
++    // settings.factor = 1.02;
++    settings.factor = 1.25; // lxdchange
++    // settings.factor = 1.10;
+     settings.chunk_size = 48;         /* space for a modest key and value */
+     settings.num_threads = 4;         /* N workers */
+     settings.num_threads_per_udp = 0;
+@@ -517,6 +604,7 @@ conn *conn_new(const int sfd, enum conn_states init_state,
+                 const int event_flags,
+                 const int read_buffer_size, enum network_transport transport,
+                 struct event_base *base) {
++    //    printf("conn_new function call\n");
+     conn *c;
+ 
+     assert(sfd >= 0 && sfd < max_fds);
+@@ -1154,22 +1242,28 @@ static void out_of_memory(conn *c, char *ascii_error) {
+  * we get here after reading the value in set/add/replace commands. The command
+  * has been stored in c->cmd, and the item is ready in c->item.
+  */
+-static void complete_nread_ascii(conn *c) {
++static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
++    // printf("complete_nread_ascii function call\n");
++    ////printf("item stat in complete_nread_ascii function\n");
++    ////print_item_stat(c->item);
+     assert(c != NULL);
+ 
+     item *it = c->item;
+-    int comm = c->cmd;
++    int comm = c->cmd; // lxdchange
+     enum store_item_type ret;
+     bool is_valid = false;
+ 
++    // printf("mutex lock\n");
+     pthread_mutex_lock(&c->thread->stats.mutex);
+     c->thread->stats.slab_stats[ITEM_clsid(it)].set_cmds++;
+     pthread_mutex_unlock(&c->thread->stats.mutex);
+ 
+     if ((it->it_flags & ITEM_CHUNKED) == 0) {
++        // printf("valid flag check\n");
+         if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) == 0) {
+             is_valid = true;
+         }
++        // printf("id_valid is %d\n", (int)is_valid);
+     } else {
+         char buf[2];
+         /* should point to the final item chunk */
+@@ -1194,11 +1288,240 @@ static void complete_nread_ascii(conn *c) {
+         }
+     }
+ 
++
++/*
+     if (!is_valid) {
+         out_string(c, "CLIENT_ERROR bad data chunk");
+     } else {
+-      ret = store_item(it, comm, c);
+ 
++#ifdef ENABLE_DTRACE
++      uint64_t cas = ITEM_get_cas(it);
++      switch (c->cmd) {
++      case NREAD_ADD:
++          MEMCACHED_COMMAND_ADD(c->sfd, ITEM_key(it), it->nkey,
++                                (ret == 1) ? it->nbytes : -1, cas);
++          break;
++      case NREAD_REPLACE:
++          MEMCACHED_COMMAND_REPLACE(c->sfd, ITEM_key(it), it->nkey,
++                                    (ret == 1) ? it->nbytes : -1, cas);
++          break;
++      case NREAD_APPEND:
++          MEMCACHED_COMMAND_APPEND(c->sfd, ITEM_key(it), it->nkey,
++                                   (ret == 1) ? it->nbytes : -1, cas);
++          break;
++      case NREAD_PREPEND:
++          MEMCACHED_COMMAND_PREPEND(c->sfd, ITEM_key(it), it->nkey,
++                                    (ret == 1) ? it->nbytes : -1, cas);
++          break;
++      case NREAD_SET:
++          MEMCACHED_COMMAND_SET(c->sfd, ITEM_key(it), it->nkey,
++                                (ret == 1) ? it->nbytes : -1, cas);
++          break;
++      case NREAD_CAS:
++          MEMCACHED_COMMAND_CAS(c->sfd, ITEM_key(it), it->nkey, it->nbytes,
++                                cas);
++          break;
++      }
++#endif
++
++    int slabclass_chunksize = get_slabclass_chunksize(it);
++    // 放大 Optane 的影响
++    // printf("benchmark cycle in complete_nread_ascii: %llu\n", simu_cycles);
++    unsigned long long int rand_id;
++    for(unsigned long long int c = 0; c < simu_cycles; c++){
++            rand_id = rand() % simu_num_chunks; // simu_num_chunks // 保证 256 byte 对齐 // random范围过大，访存性能很差，memcpy次数减少，会看不出access的性能差异
++            char *dst = simu_pslab_pool + rand_id * simu_aligns; 
++            pmem_memcpy_persist((char*)dst, (char*)it, slabclass_chunksize);
++            // pmem_persist(dst, item_size);
++    }
++    // end
++    char *pslab_addr = (char*)it + pslab_dslab_offset; // c->item 应该是从每个 slabpage 的最后一个 item 开始摘取, 也有可能摘到的是中间的 item // 地址转换
++    pmem_memcpy_persist((char*)pslab_addr, (char*)it, slabclass_chunksize);
++    
++    
++    c->item = pslab_addr;
++    ret = store_item((item*)pslab_addr, comm, c); // 涉及 hash table & lru list 的 link 操作 // 修改了 do_store_item 的实现 // lxdchange
++
++    switch (ret) {
++      case STORED:
++          out_string(c, "STORED");
++          break;
++      case EXISTS:
++          out_string(c, "EXISTS");
++          break;
++      case NOT_FOUND:
++          out_string(c, "NOT_FOUND");
++          break;
++      case NOT_STORED:
++          out_string(c, "NOT_STORED");
++          break;
++      default:
++          out_string(c, "SERVER_ERROR Unhandled storage type.");
++      }
++    }
++
++
++    item_remove(c->item);     
++    c->item = 0;
++*/
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++    /*
++        item next: 0
++        item prev: 0
++        item hash_next: 0
++        item time: 0
++        item exptime: 0
++        item nbytes: 7 (包含添加的\r\n)
++        item refcount: 1
++        item nsuffix: 0
++        item flags: 66
++        item clsid: 3
++        item nkey: 3
++        item data: value
++    */
++    // printf("item next: %llu\n", (unsigned long long int)it->next);
++    // printf("item prev: %llu\n", (unsigned long long int)it->prev);
++    // printf("item hash_next: %llu\n", (unsigned long long int)it->h_next);
++    // printf("item time: %llu\n", (unsigned long long int)it->time);
++    // printf("item exptime: %llu\n", (unsigned long long int)it->exptime);
++    // printf("item nbytes: %llu\n", (unsigned long long int)it->nbytes);
++    // printf("item refcount: %llu\n", (unsigned long long int)it->refcount);
++    // printf("item nsuffix: %llu\n", (unsigned long long int)it->nsuffix);
++    // printf("item flags: %llu\n", (unsigned long long int)it->it_flags);
++    // printf("item clsid: %llu\n", (unsigned long long int)it->slabs_clsid);
++    // printf("item nkey: %llu\n", (unsigned long long int)it->nkey);
++    // printf("item data: %s\n", ITEM_data(it));
++
++    // printf("slab class id is: %d\n", it->slabs_clsid);
++    // int slabclass_id = it->slabs_clsid & MAX_NUMBER_OF_SLAB_CLASSES;
++    
++    int id = it->slabs_clsid;
++
++    int cls_id = it->slabs_clsid - 2;
++    unsigned long long int size = mem_slab_pool[cls_id]->slot_size;
++    unsigned long long int cached_size = settings.slab_page_size / size;
++    // unsigned long long int cached_size = 1024;
++    // unsigned long long int cached_size = 1;
++
++    int thread_id = *((int*)pthread_getspecific(key));
++    struct mem_slab **cur_mem_slab;
++    switch(thread_id){
++        case 0:
++            cur_mem_slab = mem_slab_pool_1;
++            break;
++        case 1:
++            cur_mem_slab = mem_slab_pool_2;
++            break;
++        case 2:
++            cur_mem_slab = mem_slab_pool_3;
++            break;
++        case 3:
++            cur_mem_slab = mem_slab_pool_4;
++            break;
++        case 4:
++            cur_mem_slab = mem_slab_pool_5;
++            break;
++        case 5:
++            cur_mem_slab = mem_slab_pool_6;
++            break;
++        case 6:
++            cur_mem_slab = mem_slab_pool_7;
++            break;
++        case 7:
++            cur_mem_slab = mem_slab_pool_8;
++            break;
++        case 8:
++            cur_mem_slab = mem_slab_pool_9;
++            break;
++        case 9:
++            cur_mem_slab = mem_slab_pool_10;
++            break;
++        case 10:
++            cur_mem_slab = mem_slab_pool_11;
++            break;
++        case 11:
++            cur_mem_slab = mem_slab_pool_12;
++            break;
++        case 12:
++            cur_mem_slab = mem_slab_pool_13;
++            break;
++        case 13:
++            cur_mem_slab = mem_slab_pool_14;
++            break;
++        case 14:
++            cur_mem_slab = mem_slab_pool_15;
++            break;
++        case 15:
++            cur_mem_slab = mem_slab_pool_16;
++            break;
++        default:
++            cur_mem_slab = mem_slab_pool;
++            break;
++    }
++
++
++    if(it == NULL || cur_mem_slab == NULL){
++        printf("Pointer error!\n");
++    }
++    unsigned long long int cur_slot = ((char*)it - (char*)(cur_mem_slab[cls_id]->start_addr)) / cur_mem_slab[cls_id]->slot_size + 1;
++    if(cur_slot == cached_size){
++        // flush to persistent memory;
++        // char *pm_ptr = get_pmem_page(SLAB_GLOBAL_PAGE_POOL_PMEM);
++        char *pm_ptr = get_pmem_page(id);
++        if(pm_ptr == NULL){
++            printf("can not get pmem memory\n");
++            exit(0);
++        }
++        // printf("the pmem address is %llu\n", (unsigned long long int)pm_ptr);
++        pmem_memcpy_persist(pm_ptr, (char*)(cur_mem_slab[cls_id]->start_addr), size*cached_size);
++        pslab_use_slab(pm_ptr, id, size);
++        // printf("begin store item\n");
++        // link to hash table and lru list, inc refcount;
++        char *ptr = pm_ptr;
++        for(int i = 0; i < cached_size; i++, ptr+=(cur_mem_slab[cls_id]->slot_size)){
++            item *cur_item = (item*)ptr;
++            ret = store_item(cur_item, comm, c);
++            item_remove(cur_item);
++        }
++        // printf("end store item\n");
++
++        // update mem_slab_pool
++        // mem_slab_pool[cls_id]->cur_addr   = mem_slab_pool[cls_id]->start_addr;
++        // mem_slab_pool[cls_id]->used_slots = 0;
++        // mem_slab_pool[cls_id]->need_flush = 0;
++        // printf("here, pthread_id is: %llu, need to flush is:%d\n", (unsigned long long int)pthread_self(), (int)mem_slab_pool[cls_id]->need_flush);
++    }
++
++
++
++    if (!is_valid) {
++        out_string(c, "CLIENT_ERROR bad data chunk");
++    } else {
++    //   ret = store_item(it, comm, c);
++    ret = STORED;
++      // refcount 变成 2
++    //   printf("item refcount after store_item: %llu\n", (unsigned long long int)it->refcount);
+ #ifdef ENABLE_DTRACE
+       uint64_t cas = ITEM_get_cas(it);
+       switch (c->cmd) {
+@@ -1248,10 +1571,18 @@ static void complete_nread_ascii(conn *c) {
+ 
+     }
+ 
+-    item_remove(c->item);       /* release the c->item reference */
++    // item_remove(c->item);       /* release the c->item reference */ // lxdchange
+     c->item = 0;
+ }
+ 
++
++
++
++
++
++
++
++
+ /**
+  * get a pointer to the start of the request struct for the current command
+  */
+@@ -1395,6 +1726,7 @@ static void write_bin_response(conn *c, void *d, int hlen, int keylen, int dlen)
+ }
+ 
+ static void complete_incr_bin(conn *c) {
++       ////printf("complete_incr_bin function call\n");
+     item *it;
+     char *key;
+     size_t nkey;
+@@ -1494,6 +1826,7 @@ static void complete_incr_bin(conn *c) {
+ }
+ 
+ static void complete_update_bin(conn *c) {
++    printf("complete_update_bin function call\n");
+     protocol_binary_response_status eno = PROTOCOL_BINARY_RESPONSE_EINVAL;
+     enum store_item_type ret = NOT_STORED;
+     assert(c != NULL);
+@@ -1511,7 +1844,7 @@ static void complete_update_bin(conn *c) {
+         *(ITEM_data(it) + it->nbytes - 1) = '\n';
+ #ifdef PSLAB
+         if (it->it_flags & ITEM_PSLAB)
+-            pmem_flush(ITEM_data(it) + it->nbytes - 2, 2);
++            pmem_flush(ITEM_data(it) + it->nbytes - 2, 2); // lxdchange
+ #endif
+     } else {
+         assert(c->ritem);
+@@ -1523,11 +1856,12 @@ static void complete_update_bin(conn *c) {
+         ch->data[ch->used + 1] = '\n';
+ #ifdef PSLAB
+         if (it->it_flags & ITEM_PSLAB)
+-            pmem_flush(&ch->data[ch->used], 2);
++            pmem_flush(&ch->data[ch->used], 2); // lxdchange
+ #endif
+         ch->used += 2;
+     }
+ 
++    //    printf("will call store_item in complete_update_bin\n");
+     ret = store_item(it, c->cmd, c);
+ 
+ #ifdef ENABLE_DTRACE
+@@ -2692,6 +3026,7 @@ static void reset_cmd_handler(conn *c) {
+ }
+ 
+ static void complete_nread(conn *c) {
++       ////printf("complete_nread function call\n");
+     assert(c != NULL);
+     assert(c->protocol == ascii_prot
+            || c->protocol == binary_prot);
+@@ -2706,6 +3041,7 @@ static void complete_nread(conn *c) {
+ /* Destination must always be chunked */
+ /* This should be part of item.c */
+ static int _store_item_copy_chunks(item *d_it, item *s_it, const int len) {
++    printf("_store_item_copy_chunks function call\n");
+     item_chunk *dch = (item_chunk *) ITEM_data(d_it);
+ #ifdef PSLAB
+     int is_pslab = (d_it->it_flags & ITEM_PSLAB) ? 1 : 0;
+@@ -2738,7 +3074,7 @@ static int _store_item_copy_chunks(item *d_it, item *s_it, const int len) {
+             memcpy(dch->data + dch->used, sch->data + copied, todo);
+ #ifdef PSLAB
+             else
+-                pmem_memcpy_nodrain(dch->data + dch->used, sch->data + copied, todo);
++                pmem_memcpy_nodrain(dch->data + dch->used, sch->data + copied, todo); // lxdchange
+ #endif
+             dch->used += todo;
+             copied += todo;
+@@ -2773,7 +3109,7 @@ static int _store_item_copy_chunks(item *d_it, item *s_it, const int len) {
+             memcpy(dch->data + dch->used, ITEM_data(s_it) + done, todo);
+ #ifdef PSLAB
+             else
+-                pmem_memcpy_nodrain(dch->data + dch->used, ITEM_data(s_it) + done, todo);
++                pmem_memcpy_nodrain(dch->data + dch->used, ITEM_data(s_it) + done, todo); // lxdchange
+ #endif
+             done += todo;
+             dch->used += todo;
+@@ -2793,6 +3129,7 @@ static int _store_item_copy_chunks(item *d_it, item *s_it, const int len) {
+ }
+ 
+ static int _store_item_copy_data(int comm, item *old_it, item *new_it, item *add_it) {
++    printf("_store_item_copy_data function call\n");
+     if (comm == NREAD_APPEND) {
+         if (new_it->it_flags & ITEM_CHUNKED) {
+             if (_store_item_copy_chunks(new_it, old_it, old_it->nbytes - 2) == -1 ||
+@@ -2801,7 +3138,7 @@ static int _store_item_copy_data(int comm, item *old_it, item *new_it, item *add
+             }
+         } else {
+ #ifdef PSLAB
+-            if (new_it->it_flags & ITEM_PSLAB) {
++            if (new_it->it_flags & ITEM_PSLAB) { // lxdchange
+                 pmem_memcpy_nodrain(ITEM_data(new_it), ITEM_data(old_it), old_it->nbytes);
+                 pmem_memcpy_nodrain(ITEM_data(new_it) + old_it->nbytes - 2 /* CRLF */, ITEM_data(add_it), add_it->nbytes);
+                 return 0;
+@@ -2819,7 +3156,7 @@ static int _store_item_copy_data(int comm, item *old_it, item *new_it, item *add
+             }
+         } else {
+ #ifdef PSLAB
+-            if (new_it->it_flags & ITEM_PSLAB) {
++            if (new_it->it_flags & ITEM_PSLAB) { // lxdchange
+                 pmem_memcpy_nodrain(ITEM_data(new_it), ITEM_data(add_it), add_it->nbytes);
+                 pmem_memcpy_nodrain(ITEM_data(new_it) + add_it->nbytes - 2 /* CRLF */, ITEM_data(old_it), old_it->nbytes);
+                 return 0;
+@@ -2839,21 +3176,28 @@ static int _store_item_copy_data(int comm, item *old_it, item *new_it, item *add
+  * Returns the state of storage.
+  */
+ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t hv) {
++    
++    // printf("begin do_store_item function\n");
++
+     char *key = ITEM_key(it);
+-    item *old_it = do_item_get(key, it->nkey, hv, c, DONT_UPDATE);
++    item *old_it = do_item_get(key, it->nkey, hv, c, DONT_UPDATE); // 在没有 link 到 hash 表的时候是查找不到的
++    // printf("the address of old_item is %llu\n", (unsigned long long int)old_it);
+     enum store_item_type stored = NOT_STORED;
+ 
+     item *new_it = NULL;
+     uint32_t flags;
+ 
+     if (old_it != NULL && comm == NREAD_ADD) {
++        //    printf("will call do_item_update\n");
+         /* add only adds a nonexistent item, but promote to head of LRU */
+         do_item_update(old_it);
+     } else if (!old_it && (comm == NREAD_REPLACE
+         || comm == NREAD_APPEND || comm == NREAD_PREPEND))
+     {
++           ////printf("will do nothing\n");
+         /* replace only replaces an existing value; don't store */
+     } else if (comm == NREAD_CAS) {
++           ////printf("will do 1\n");
+         /* validate cas operation */
+         if(old_it == NULL) {
+             // LRU expired
+@@ -2886,12 +3230,15 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
+             stored = EXISTS;
+         }
+     } else {
++        
++        ////printf("will do 2\n");
+         int failed_alloc = 0;
+         /*
+          * Append - combine new and old record into single one. Here it's
+          * atomic and thread-safe.
+          */
+         if (comm == NREAD_APPEND || comm == NREAD_PREPEND) {
++            
+             /*
+              * Validate CAS
+              */
+@@ -2911,6 +3258,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
+             } else
+ #endif
+             if (stored == NOT_STORED) {
++                   ////printf("will do 2-1\n");
+                 /* we have it and old_it here - alloc memory to hold both */
+                 /* flags was already lost - so recover them from ITEM_suffix(it) */
+ 
+@@ -2938,10 +3286,13 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
+         }
+ 
+         if (stored == NOT_STORED && failed_alloc == 0) {
++               ////printf("will do 2-2\n");
+             if (old_it != NULL) {
++                printf("will call item_replace in do_store_item\n");
+                 STORAGE_delete(c->thread->storage, old_it);
+                 item_replace(old_it, it, hv);
+             } else {
++                // printf("will call item_link in do_store_item\n");
+                 do_item_link(it, hv);
+             }
+ 
+@@ -2952,7 +3303,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
+     }
+ 
+     if (old_it != NULL)
+-        do_item_remove(old_it);         /* release our reference */
++        do_item_remove(old_it);        /* release our reference */
+     if (new_it != NULL)
+         do_item_remove(new_it);
+ 
+@@ -2962,6 +3313,8 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
+     LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE, NULL,
+             stored, comm, ITEM_key(it), it->nkey, it->exptime, ITEM_clsid(it));
+ 
++    ////printf("end do_store_item function\n");
++
+     return stored;
+ }
+ 
+@@ -4022,7 +4375,27 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
+     }
+ }
+ 
+-static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) {
++static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) { // 核心操作，总纲核心操作
++
++    // printf("begin process_update_command function\n");
++
++/*
++typedef struct token_s {
++    char *value;
++    size_t length;
++} token_t;
++
++*/
++    // printf("Parsing, the command is as follows\n");
++    // for(size_t i = 0; i < ntokens; i++){
++    //     printf("%s, ", tokens[i].value);
++    // }
++    // printf("\nEnd parsing\n");
++    //// 当前一个 item 的所有信息保存在 DRAM Buffer 中
++
++
++
++
+     char *key;
+     size_t nkey;
+     unsigned int flags;
+@@ -4072,15 +4445,18 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
+         out_string(c, "CLIENT_ERROR bad command line format");
+         return;
+     }
+-    vlen += 2;
++    vlen += 2; // value data 补充换行
+ 
+     if (settings.detail_enabled) {
+         stats_prefix_record_set(key, nkey);
+     }
+ 
+-    it = item_alloc(key, nkey, flags, realtime(exptime), vlen);
++    //    printf("will call item_alloc in process_update_command\n");
++    // prototype: item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
++    it = item_alloc(key, nkey, flags, realtime(exptime), vlen); // 核心操作
+ 
+     if (it == 0) {
++        printf("error in process_update_command\n");
+         enum store_item_type status;
+         if (! item_size_ok(nkey, flags, vlen)) {
+             out_string(c, "SERVER_ERROR object too large for cache");
+@@ -4108,13 +4484,19 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
+ 
+         return;
+     }
++    
+     ITEM_set_cas(it, req_cas_id);
+ 
+-    c->item = it;
++    // printf("the c->item address is %llu\n", (unsigned long long int)it);
++    c->item = it; // dram item or pmem item
++    ////printf("setting conn->ritem in process_update_command, equals to ITEM_data(it)\n");
+     c->ritem = ITEM_data(it);
++    ////printf("setting conn->rlbytes in process_update_command, equals to it->nbytes, means the length of value\n");
+     c->rlbytes = it->nbytes;
+     c->cmd = comm;
+     conn_set_state(c, conn_nread);
++
++    // printf("end process_update_command function\n");
+ }
+ 
+ static void process_touch_command(conn *c, token_t *tokens, const size_t ntokens) {
+@@ -4637,6 +5019,8 @@ static void process_extstore_command(conn *c, token_t *tokens, const size_t ntok
+ #endif
+ static void process_command(conn *c, char *command) {
+ 
++       ////printf("begin process_command function\n");
++
+     token_t tokens[MAX_TOKENS];
+     size_t ntokens;
+     int comm;
+@@ -4666,6 +5050,8 @@ static void process_command(conn *c, char *command) {
+         ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
+          (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
+ 
++        //    printf("will call process_get_command in process_command\n");
++
+         process_get_command(c, tokens, ntokens, false, false);
+ 
+     } else if ((ntokens == 6 || ntokens == 7) &&
+@@ -4674,7 +5060,8 @@ static void process_command(conn *c, char *command) {
+                 (strcmp(tokens[COMMAND_TOKEN].value, "replace") == 0 && (comm = NREAD_REPLACE)) ||
+                 (strcmp(tokens[COMMAND_TOKEN].value, "prepend") == 0 && (comm = NREAD_PREPEND)) ||
+                 (strcmp(tokens[COMMAND_TOKEN].value, "append") == 0 && (comm = NREAD_APPEND)) )) {
+-
++        
++        //    printf("will call process_update_command in process_command\n");
+         process_update_command(c, tokens, ntokens, comm, false);
+ 
+     } else if ((ntokens == 7 || ntokens == 8) && (strcmp(tokens[COMMAND_TOKEN].value, "cas") == 0 && (comm = NREAD_CAS))) {
+@@ -4947,6 +5334,10 @@ static void process_command(conn *c, char *command) {
+             out_string(c, "ERROR");
+         }
+     }
++
++    ////printf("end process_command function\n");
++
++
+     return;
+ }
+ 
+@@ -4954,6 +5345,9 @@ static void process_command(conn *c, char *command) {
+  * if we have a complete line in the buffer, process it.
+  */
+ static int try_read_command(conn *c) {
++
++    ////printf("begin try_read_command function\n");
++
+     assert(c != NULL);
+     assert(c->rcurr <= (c->rbuf + c->rsize));
+     assert(c->rbytes > 0);
+@@ -5074,6 +5468,7 @@ static int try_read_command(conn *c) {
+         assert(cont <= (c->rcurr + c->rbytes));
+ 
+         c->last_cmd_time = current_time;
++        //    printf("will call process_command in try_read_command\n");
+         process_command(c, c->rcurr);
+ 
+         c->rbytes -= (cont - c->rcurr);
+@@ -5082,6 +5477,7 @@ static int try_read_command(conn *c) {
+         assert(c->rcurr <= (c->rbuf + c->rsize));
+     }
+ 
++    ////printf("end try_read_command function\n");
+     return 1;
+ }
+ 
+@@ -5326,6 +5722,7 @@ static enum transmit_result transmit(conn *c) {
+  * Also, benchmark using readv's.
+  */
+ static int read_into_chunked_item(conn *c) {
++    printf("read_into_chunked_item function call\n");
+     int total = 0;
+     int res;
+ #ifdef PSLAB
+@@ -5367,7 +5764,7 @@ static int read_into_chunked_item(conn *c) {
+ #endif
+                 memmove(ch->data + ch->used, c->rcurr, tocopy);
+ #ifdef PSLAB
+-                else
++                else // lxdchange
+                     pmem_memmove_nodrain(ch->data + ch->used, c->rcurr, tocopy);
+ #endif
+             }
+@@ -5386,7 +5783,7 @@ static int read_into_chunked_item(conn *c) {
+             if (res > 0) {
+ #ifdef PSLAB
+                 if (is_pslab)
+-                    pmem_flush(ch->data + ch->used, res);
++                    pmem_flush(ch->data + ch->used, res); // lxdchange
+ #endif
+                 pthread_mutex_lock(&c->thread->stats.mutex);
+                 c->thread->stats.bytes_read += res;
+@@ -5420,6 +5817,7 @@ static int read_into_chunked_item(conn *c) {
+ }
+ 
+ static void drive_machine(conn *c) {
++       ////printf("drive_machine function call\n");
+     bool stop = false;
+     int sfd;
+     socklen_t addrlen;
+@@ -5439,6 +5837,7 @@ static void drive_machine(conn *c) {
+ 
+         switch(c->state) {
+         case conn_listening:
++               ////printf("drive_machine: conn_listening\n");
+             addrlen = sizeof(addr);
+ #ifdef HAVE_ACCEPT4
+             if (use_accept4) {
+@@ -5486,6 +5885,7 @@ static void drive_machine(conn *c) {
+                 stats.rejected_conns++;
+                 STATS_UNLOCK();
+             } else {
++                //    printf("will call dispatch_conn_new in conn_listening\f");
+                 dispatch_conn_new(sfd, conn_new_cmd, EV_READ | EV_PERSIST,
+                                      DATA_BUFFER_SIZE, c->transport);
+             }
+@@ -5494,6 +5894,7 @@ static void drive_machine(conn *c) {
+             break;
+ 
+         case conn_waiting:
++               ////printf("drive_machine: conn_waiting\n");
+             if (!update_event(c, EV_READ | EV_PERSIST)) {
+                 if (settings.verbose > 0)
+                     fprintf(stderr, "Couldn't update event\n");
+@@ -5506,6 +5907,7 @@ static void drive_machine(conn *c) {
+             break;
+ 
+         case conn_read:
++               ////printf("drive_machine: conn_read\n");
+             res = IS_UDP(c->transport) ? try_read_udp(c) : try_read_network(c);
+ 
+             switch (res) {
+@@ -5525,6 +5927,7 @@ static void drive_machine(conn *c) {
+             break;
+ 
+         case conn_parse_cmd :
++               ////printf("drive_machine: conn_parse_cmd\n");
+             if (try_read_command(c) == 0) {
+                 /* wee need more data! */
+                 conn_set_state(c, conn_waiting);
+@@ -5533,6 +5936,7 @@ static void drive_machine(conn *c) {
+             break;
+ 
+         case conn_new_cmd:
++               ////printf("drive_machine: conn_new_cmd\n");
+             /* Only process nreqs at a time to avoid starving other
+                connections */
+ 
+@@ -5562,7 +5966,9 @@ static void drive_machine(conn *c) {
+             break;
+ 
+         case conn_nread:
++               ////printf("drive_machine: conn_nread\n");
+             if (c->rlbytes == 0) {
++                //    printf("will call complete_nread in conn_nread\n");
+                 complete_nread(c);
+                 break;
+             }
+@@ -5577,21 +5983,32 @@ static void drive_machine(conn *c) {
+             }
+ 
+             if (!c->item || (((item *)c->item)->it_flags & ITEM_CHUNKED) == 0) {
++                //#print_item_stat(c->item);
+ #ifdef PSLAB
+                 int is_pslab = (c->item) && (((item *)c->item)->it_flags & ITEM_PSLAB) ? 1 : 0;
+ #endif
+ 
++                // printf("conn nread, is_pslab is: %d\n", is_pslab);
++
+                 /* first check if we have leftovers in the conn_read buffer */
+                 if (c->rbytes > 0) {
++                       ////printf("exec memmove in conn_nread\n");
+                     int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
+                     if (c->ritem != c->rcurr) {
+ #ifdef PSLAB
+                         if (is_pslab == 0)
+ #endif
+-                        memmove(c->ritem, c->rcurr, tocopy);
++                        {
++                            ////printf("conn nread, will call memmove\n");
++                            memmove(c->ritem, c->rcurr, tocopy);
++                        }
+ #ifdef PSLAB
+                         else
+-                            pmem_memmove_nodrain(c->ritem, c->rcurr, tocopy);
++                        {
++                            memmove(c->ritem, c->rcurr, tocopy);
++                            ////printf("conn nread, will call pmem_memmove_nodrain\n");
++                            // pmem_memmove_nodrain(c->ritem, c->rcurr, tocopy); // lxdchange
++                        }
+ #endif
+                     }
+                     c->ritem += tocopy;
+@@ -5604,11 +6021,17 @@ static void drive_machine(conn *c) {
+                 }
+ 
+                 /*  now try reading from the socket */
+-                res = read(c->sfd, c->ritem, c->rlbytes);
++                res = read(c->sfd, c->ritem, c->rlbytes); // item 初始化为 (item) 的 value data 域
+                 if (res > 0) {
+ #ifdef PSLAB
+-                    if (is_pslab)
+-                        pmem_flush(c->ritem, res);
++                    if (is_pslab) // value data flush here
++                    {
++                        //printf("pmem_flush c->ritem of length res\n");
++                        // printf("pmem_flush c->ritem of length res, cancelled\n");
++                        // pmem_flush(c->ritem, res); // lxdchange
++                        //printf("end pmem_flush\n");
++                    }
++                        
+ #endif
+                     pthread_mutex_lock(&c->thread->stats.mutex);
+                     c->thread->stats.bytes_read += res;
+@@ -5662,6 +6085,7 @@ static void drive_machine(conn *c) {
+             break;
+ 
+         case conn_swallow:
++               ////printf("drive_machine: conn_swallow\n");
+             /* we are reading sbytes and throwing them away */
+             if (c->sbytes <= 0) {
+                 conn_set_state(c, conn_new_cmd);
+@@ -5712,6 +6136,7 @@ static void drive_machine(conn *c) {
+              * assemble it into a msgbuf list (this will be a single-entry
+              * list for TCP or a two-entry list for UDP).
+              */
++               ////printf("drive_machine: conn_write\n");
+             if (c->iovused == 0 || (IS_UDP(c->transport) && c->iovused == 1)) {
+                 if (add_iov(c, c->wcurr, c->wbytes) != 0) {
+                     if (settings.verbose > 0)
+@@ -5724,6 +6149,7 @@ static void drive_machine(conn *c) {
+             /* fall through... */
+ 
+         case conn_mwrite:
++               ////printf("drive_machine: conn_mwrite\n");
+ #ifdef EXTSTORE
+             /* have side IO's that must process before transmit() can run.
+              * remove the connection from the worker thread and dispatch the
+@@ -5781,6 +6207,7 @@ static void drive_machine(conn *c) {
+             break;
+ 
+         case conn_closing:
++               ////printf("drive_machine: conn_closing\n");
+             if (IS_UDP(c->transport))
+                 conn_cleanup(c);
+             else
+@@ -5789,15 +6216,18 @@ static void drive_machine(conn *c) {
+             break;
+ 
+         case conn_closed:
++               ////printf("drive_machine: conn_closed\n");
+             /* This only happens if dormando is an idiot. */
+             abort();
+             break;
+ 
+         case conn_watch:
++               ////printf("drive_machine: conn_watch\n");
+             /* We handed off our connection to the logger thread. */
+             stop = true;
+             break;
+         case conn_max_state:
++               ////printf("drive_machine: conn_max_state\n");
+             assert(false);
+             break;
+         }
+@@ -5807,6 +6237,7 @@ static void drive_machine(conn *c) {
+ }
+ 
+ void event_handler(const int fd, const short which, void *arg) {
++       ////printf("event_handler function call\n");
+     conn *c;
+ 
+     c = (conn *)arg;
+@@ -5893,6 +6324,7 @@ static int server_socket(const char *interface,
+                          int port,
+                          enum network_transport transport,
+                          FILE *portnumber_file) {
++    //    printf("server_socket function call\n");
+     int sfd;
+     struct linger ling = {0, 0};
+     struct addrinfo *ai;
+@@ -6013,11 +6445,13 @@ static int server_socket(const char *interface,
+                  * FD to each thread.
+                  */
+                 int per_thread_fd = c ? dup(sfd) : sfd;
++                //    printf("will call dispatch_conn_new in server_socket, is udp transport\n");
+                 dispatch_conn_new(per_thread_fd, conn_read,
+                                   EV_READ | EV_PERSIST,
+                                   UDP_READ_BUFFER_SIZE, transport);
+             }
+         } else {
++            //    printf("will call conn_new in server_socket, is tcp transport\n");
+             if (!(listen_conn_add = conn_new(sfd, conn_listening,
+                                              EV_READ | EV_PERSIST, 1,
+                                              transport, main_base))) {
+@@ -6037,7 +6471,11 @@ static int server_socket(const char *interface,
+ 
+ static int server_sockets(int port, enum network_transport transport,
+                           FILE *portnumber_file) {
++
++    //    printf("server_sockets function call\n");
++
+     if (settings.inter == NULL) {
++        //    printf("will call server_socket in server_sockets with setting.inter==NULL\n");
+         return server_socket(settings.inter, port, transport, portnumber_file);
+     } else {
+         // tokenize them and bind to each one of them..
+@@ -6090,6 +6528,7 @@ static int server_sockets(int port, enum network_transport transport,
+             if (strcmp(p, "*") == 0) {
+                 p = NULL;
+             }
++            //    printf("will call server_socket in server_sockets within a cycle\n");
+             ret |= server_socket(p, the_port, transport, portnumber_file);
+         }
+         free(list);
+@@ -6697,6 +7136,7 @@ int main (int argc, char **argv) {
+         PSLAB_RECOVER,
+         PSLAB_FORCE,
+ #endif
++        BENCHMARK_CYCLES,
+     };
+     char *const subopts_tokens[] = {
+         [MAXCONNS_FAST] = "maxconns_fast",
+@@ -6761,6 +7201,7 @@ int main (int argc, char **argv) {
+         [PSLAB_RECOVER] = "pslab_recover",
+         [PSLAB_FORCE] = "pslab_force",
+ #endif
++        [BENCHMARK_CYCLES] = "benchmark_cycles",
+         NULL
+     };
+ 
+@@ -7447,7 +7888,7 @@ int main (int argc, char **argv) {
+ #endif
+ #ifdef PSLAB
+             case PSLAB_FILE:
+-                pslab_file = strdup(subopts_value);
++                pslab_file = strdup(subopts_value);/* strdup, string copy */
+                 break;
+             case PSLAB_SIZE:
+                 if (subopts_value == NULL) {
+@@ -7455,10 +7896,10 @@ int main (int argc, char **argv) {
+                     return 1;
+                 }
+                 pslab_size = ((size_t)atoi(subopts_value)) * 1024 * 1024;
+-fprintf(stderr, "pslab_size=%ld", pslab_size);
++fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+                 break;
+-            case PSLAB_POLICY:
+-                if (strncmp(subopts_value, "dram", 4) == 0) {
++            case PSLAB_POLICY: // 默认是 PSLAB_POLICY_DRAM
++                if (strncmp(subopts_value, "dram", 4) == 0) { /* strncmp(str1, str2, length), comparison of the first n bytes of two string */
+                     settings.pslab_policy = PSLAB_POLICY_DRAM;
+                 } else if (strncmp(subopts_value, "pmem", 4) == 0) {
+                     settings.pslab_policy = PSLAB_POLICY_PMEM;
+@@ -7500,7 +7941,11 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+             case RELAXED_PRIVILEGES:
+                 settings.relaxed_privileges = true;
+                 break;
+-#endif
++#endif      
++            case BENCHMARK_CYCLES:
++                simu_cycles = atol(subopts_value);
++                printf("benchmark cycles: %llu\n", simu_cycles);
++                break;
+             default:
+                 printf("Illegal suboption \"%s\"\n", subopts_value);
+                 return 1;
+@@ -7702,6 +8147,8 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+ 
+     /* daemonize if requested */
+     /* if we want to ensure our ability to dump core, don't chdir to / */
++    /*** lxd modification */
++    /*
+     if (do_daemonize) {
+         if (sigignore(SIGHUP) == -1) {
+             perror("Failed to ignore SIGHUP");
+@@ -7711,6 +8158,17 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+             exit(EXIT_FAILURE);
+         }
+     }
++    */
++    if (do_daemonize) {
++    if (signal(SIGHUP, SIG_IGN) == SIG_ERR) {
++        perror("Failed to ignore SIGHUP");
++    }
++    if (daemonize(maxcore, settings.verbose) == -1) {
++        fprintf(stderr, "failed to daemon() in order to daemonize\n");
++        exit(EXIT_FAILURE);
++    }
++}
++
+ 
+     /* lock paged memory if needed */
+     if (lock_memory) {
+@@ -7775,6 +8233,200 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+     conn_init();
+     slabs_init(settings.maxbytes, settings.factor, preallocate,
+             use_slab_sizes ? slab_sizes : NULL);
++
++    pthread_key_create(&key, NULL);
++
++    uint32_t dump_slab_sizes[MAX_NUMBER_OF_SLAB_CLASSES];
++    int dump_slab_num = slabs_dump_sizes(dump_slab_sizes, MAX_NUMBER_OF_SLAB_CLASSES);
++    if (dump_slab_num == -1) {
++        fprintf(stderr, "slabs sizes dump failed\n");
++    }
++
++
++    mem_slab_pool_1  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_1[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_1[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_1[a]->cur_addr   = mem_slab_pool_1[a]->start_addr;
++        mem_slab_pool_1[a]->used_slots = 0;
++        mem_slab_pool_1[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_1[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_2  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_2[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_2[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_2[a]->cur_addr   = mem_slab_pool_2[a]->start_addr;
++        mem_slab_pool_2[a]->used_slots = 0;
++        mem_slab_pool_2[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_2[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_3  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_3[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_3[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_3[a]->cur_addr   = mem_slab_pool_3[a]->start_addr;
++        mem_slab_pool_3[a]->used_slots = 0;
++        mem_slab_pool_3[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_3[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_4  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_4[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_4[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_4[a]->cur_addr   = mem_slab_pool_4[a]->start_addr;
++        mem_slab_pool_4[a]->used_slots = 0;
++        mem_slab_pool_4[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_4[a]->need_flush = 0;
++    }
++
++
++    mem_slab_pool_5  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_5[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_5[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_5[a]->cur_addr   = mem_slab_pool_5[a]->start_addr;
++        mem_slab_pool_5[a]->used_slots = 0;
++        mem_slab_pool_5[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_5[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_6  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_6[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_6[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_6[a]->cur_addr   = mem_slab_pool_6[a]->start_addr;
++        mem_slab_pool_6[a]->used_slots = 0;
++        mem_slab_pool_6[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_6[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_7  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_7[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_7[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_7[a]->cur_addr   = mem_slab_pool_7[a]->start_addr;
++        mem_slab_pool_7[a]->used_slots = 0;
++        mem_slab_pool_7[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_7[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_8  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_8[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_8[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_8[a]->cur_addr   = mem_slab_pool_8[a]->start_addr;
++        mem_slab_pool_8[a]->used_slots = 0;
++        mem_slab_pool_8[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_8[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_9  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_9[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_9[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_9[a]->cur_addr   = mem_slab_pool_9[a]->start_addr;
++        mem_slab_pool_9[a]->used_slots = 0;
++        mem_slab_pool_9[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_9[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_10  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_10[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_10[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_10[a]->cur_addr   = mem_slab_pool_10[a]->start_addr;
++        mem_slab_pool_10[a]->used_slots = 0;
++        mem_slab_pool_10[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_10[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_11  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_11[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_11[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_11[a]->cur_addr   = mem_slab_pool_11[a]->start_addr;
++        mem_slab_pool_11[a]->used_slots = 0;
++        mem_slab_pool_11[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_11[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_12  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_12[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_12[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_12[a]->cur_addr   = mem_slab_pool_12[a]->start_addr;
++        mem_slab_pool_12[a]->used_slots = 0;
++        mem_slab_pool_12[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_12[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_13  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_13[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_13[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_13[a]->cur_addr   = mem_slab_pool_13[a]->start_addr;
++        mem_slab_pool_13[a]->used_slots = 0;
++        mem_slab_pool_13[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_13[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_14  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_14[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_14[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_14[a]->cur_addr   = mem_slab_pool_14[a]->start_addr;
++        mem_slab_pool_14[a]->used_slots = 0;
++        mem_slab_pool_14[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_14[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_15  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_15[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_15[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_15[a]->cur_addr   = mem_slab_pool_15[a]->start_addr;
++        mem_slab_pool_15[a]->used_slots = 0;
++        mem_slab_pool_15[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_15[a]->need_flush = 0;
++    }
++
++    mem_slab_pool_16  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool_16[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool_16[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool_16[a]->cur_addr   = mem_slab_pool_16[a]->start_addr;
++        mem_slab_pool_16[a]->used_slots = 0;
++        mem_slab_pool_16[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool_16[a]->need_flush = 0;
++    }
++
++
++
++
++    mem_slab_pool  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
++    pmem_slab_pool = (struct pmem_slab**)malloc(dump_slab_num * sizeof(struct pmem_slab *));
++    for(int a = 0; a < dump_slab_num; a++){
++        mem_slab_pool[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
++        mem_slab_pool[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
++        mem_slab_pool[a]->cur_addr   = mem_slab_pool[a]->start_addr;
++        mem_slab_pool[a]->used_slots = 0;
++        mem_slab_pool[a]->slot_size  = dump_slab_sizes[a];
++        mem_slab_pool[a]->need_flush = 0;
++
++        pmem_slab_pool[a] = (struct pmem_slab *)malloc(sizeof(struct pmem_slab));
++        pmem_slab_pool[a]->cur_addr = NULL;
++        pmem_slab_pool[a]->total_slots = 1024 * 1024 / dump_slab_sizes[a];
++        pmem_slab_pool[a]->used_slots  = 0;
++    }
++    thread_index = (unsigned long long int*)malloc(16 * sizeof(unsigned long long int));
++    // local = 0;
++    atomic_store(&local, 0);
++
++    
+ #ifdef PSLAB
+     if (pslab_file) {
+         uint32_t dump_sizes[MAX_NUMBER_OF_SLAB_CLASSES];
+@@ -7783,6 +8435,14 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+             fprintf(stderr, "slabs sizes dump failed\n");
+             exit(EXIT_FAILURE);
+         }
++
++        printf("the dump sizes is: %d\n", dump_num); // max size is 512k = 524288
++        for(int i = 0; i < MAX_NUMBER_OF_SLAB_CLASSES; i++){
++            printf("%u, ", dump_sizes[i]);
++        }
++        printf("\n");
++
++
+         if (settings.pslab_recover == false) {
+             if (pslab_create(pslab_file, settings.pslab_size,
+                     settings.slab_page_size, dump_sizes, dump_num) != 0) {
+@@ -7808,7 +8468,9 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+             }
+             settings.pslab_recover = false;
+         }
++        //    printf("Will call slabs_prefill_global_from_pmem after pslab_create in memcached.c\n");
+         slabs_prefill_global_from_pmem();
++        //    printf("Will call slabs_update_policy after pslab_create and prefill_global in memcached.c\n");
+         slabs_update_policy();
+     }
+ #endif
+@@ -7843,10 +8505,19 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+      * ignore SIGPIPE signals; we can use errno == EPIPE if we
+      * need that information
+      */
++    /* lxd modification */
++    /*
+     if (sigignore(SIGPIPE) == -1) {
+         perror("failed to ignore SIGPIPE; sigaction");
+         exit(EX_OSERR);
+     }
++    */
++    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
++        perror("failed to ignore SIGPIPE; sigaction");
++        exit(EX_OSERR);
++    }   
++
++
+     /* start up worker threads if MT mode */
+ #ifdef EXTSTORE
+     slabs_set_storage(storage);
+@@ -7921,6 +8592,7 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+         }
+ 
+         errno = 0;
++        //   printf("Init TCP Server Sockets\n");
+         if (settings.port && server_sockets(settings.port, tcp_transport,
+                                            portnumber_file)) {
+             vperror("failed to listen on TCP port %d", settings.port);
+@@ -7936,6 +8608,7 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+ 
+         /* create the UDP listening socket and bind it */
+         errno = 0;
++        //    printf("Init UDP Server Sockets\n");
+         if (settings.udpport && server_sockets(settings.udpport, udp_transport,
+                                               portnumber_file)) {
+             vperror("failed to listen on UDP port %d", settings.udpport);
+@@ -7988,5 +8661,7 @@ fprintf(stderr, "pslab_size=%ld", pslab_size);
+     if (u_socket)
+       free(u_socket);
+ 
++    pthread_key_delete(key);
++
+     return retval;
+ }
+diff --git a/memcached.h b/memcached.h
+index 7778c4c..109f649 100755
+--- a/memcached.h
++++ b/memcached.h
+@@ -45,6 +45,7 @@
+ 
+ #include "sasl_defs.h"
+ 
++
+ /** Maximum length of a key. */
+ #define KEY_MAX_LENGTH 250
+ 
+@@ -108,10 +109,16 @@
+ #ifdef PSLAB
+ #define SLAB_GLOBAL_PAGE_POOL_PMEM 1 /* magic slab class for storing pmem pages for reassignment */
+ #endif
++// #define CHUNK_ALIGN_BYTES 2
+ #define CHUNK_ALIGN_BYTES 8
++// #define CHUNK_ALIGN_BYTES 16
++// #define CHUNK_ALIGN_BYTES 64
++// #define CHUNK_ALIGN_BYTES 256    // lxdchange
+ /* slab class max is a 6-bit number, -1. */
+ #define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
+ 
++#define GROUP_THRESHOLD 16
++
+ /** How long an object can reasonably be assumed to be locked before
+     harvesting it on a low memory condition. Default: disabled. */
+ #define TAIL_REPAIR_TIME_DEFAULT 0
+@@ -185,6 +192,80 @@ typedef void (*ADD_STAT)(const char *key, const uint16_t klen,
+ /**
+  * Possible states of a connection.
+  */
++// lxdchange 7
++// extern long long int frame_off;
++// extern char *dslab_pool;
++// extern long long int pmem_index;
++extern long long int pslab_dslab_offset;
++// extern long long int dram_pool_size;
++// extern long long int used_slab_pages;
++// extern char *pmem_pool_start;
++// extern char *pmem_pool_end;
++// extern char *dram_pool_start;
++// extern char *dram_pool_end;
++// extern long long int threshold_slab_pages;
++// extern int groups[MAX_NUMBER_OF_SLAB_CLASSES];
++// extern char **groups_ptr[MAX_NUMBER_OF_SLAB_CLASSES][GROUP_THRESHOLD];
++// static int remain_pages[MAX_NUMBER_OF_SLAB_CLASSES];
++
++// extern char *pool_start;
++
++
++
++
++extern char *simu_pslab_pool;
++extern char *simu_pslab_pool_file_path;
++extern unsigned long long int simu_pslab_pool_size;
++extern unsigned long long int simu_aligns;
++extern unsigned long long int simu_num_chunks;
++// extern unsigned long long int simu_item_size;
++extern unsigned long long int simu_cycles;
++// extern int *random_array;
++
++extern unsigned long long int pmem_pool_index;
++
++struct mem_slab{
++    char *start_addr;
++    char *cur_addr;
++    unsigned long long int used_slots;
++    unsigned long long int slot_size;
++    atomic_uint_fast8_t need_flush;
++};
++
++struct pmem_slab{
++    char *cur_addr;
++    unsigned long long int used_slots;
++    unsigned long long int total_slots;
++};
++
++
++extern struct mem_slab **mem_slab_pool_1;
++extern struct mem_slab **mem_slab_pool_2;
++extern struct mem_slab **mem_slab_pool_3;
++extern struct mem_slab **mem_slab_pool_4;
++extern struct mem_slab **mem_slab_pool_5;
++extern struct mem_slab **mem_slab_pool_6;
++extern struct mem_slab **mem_slab_pool_7;
++extern struct mem_slab **mem_slab_pool_8;
++extern struct mem_slab **mem_slab_pool_9;
++extern struct mem_slab **mem_slab_pool_10;
++extern struct mem_slab **mem_slab_pool_11;
++extern struct mem_slab **mem_slab_pool_12;
++extern struct mem_slab **mem_slab_pool_13;
++extern struct mem_slab **mem_slab_pool_14;
++extern struct mem_slab **mem_slab_pool_15;
++extern struct mem_slab **mem_slab_pool_16;
++
++
++
++extern struct mem_slab **mem_slab_pool;
++extern struct pmem_slab **pmem_slab_pool;
++extern unsigned long long int *thread_index;
++extern atomic_uint_fast8_t local;
++
++extern pthread_key_t key;
++
++
+ enum conn_states {
+     conn_listening,  /**< the socket which listens for connections */
+     conn_new_cmd,    /**< Prepare connection for next command */
+@@ -469,10 +550,10 @@ extern struct settings settings;
+ #define ITEM_ACTIVE 16
+ /* If an item's storage are chained chunks. */
+ #define ITEM_CHUNKED 32
+-#define ITEM_CHUNK 64
++#define ITEM_CHUNK 64            
+ #ifdef PSLAB
+ /* If an item is stored in pmem */
+-#define ITEM_PSLAB 64
++#define ITEM_PSLAB 64     // ITEM_CHUNK and ITEM_PSLAB is conflict
+ #endif
+ #ifdef EXTSTORE
+ /* ITEM_data bulk is external to item */
+@@ -508,6 +589,7 @@ typedef struct _stritem {
+     /* then data with terminating \r\n (no terminating null; it's binary!) */
+ } item;
+ 
++
+ // TODO: If we eventually want user loaded modules, we can't use an enum :(
+ enum crawler_run_type {
+     CRAWLER_AUTOEXPIRE=0, CRAWLER_EXPIRED, CRAWLER_METADUMP
+@@ -739,6 +821,32 @@ extern int daemonize(int nochdir, int noclose);
+ #include "hash.h"
+ #include "util.h"
+ 
++
++
++
++/* lxd modification */
++// #define ITEM_LINKED 1
++// #define ITEM_CAS 2
++
++// /* temp */
++// #define ITEM_SLABBED 4
++
++// /* Item was fetched at least once in its lifetime */
++// #define ITEM_FETCHED 8
++// /* Appended on fetch, removed on LRU shuffling */
++// #define ITEM_ACTIVE 16
++// /* If an item's storage are chained chunks. */
++// #define ITEM_CHUNKED 32
++// #define ITEM_CHUNK 64
++// #ifdef PSLAB
++// /* If an item is stored in pmem */
++// #define ITEM_PSLAB 64
++// #endif
++// #ifdef EXTSTORE
++// /* ITEM_data bulk is external to item */
++// #define ITEM_HDR 128
++// #endif
++void print_item_stat(item* it);
+ /*
+  * Functions such as the libevent-related calls that need to do cross-thread
+  * communication in multithreaded mode (rather than actually doing the work
+diff --git a/pslab.c b/pslab.c
+index a42798c..c6496f4 100755
+--- a/pslab.c
++++ b/pslab.c
+@@ -4,10 +4,13 @@
+  * Licensed under the BSD-3 license. see LICENSE.Lenovo.txt for full text
+  */
+ #include "memcached.h"
++#include <stdlib.h>
+ #include <stddef.h>
+ #include <string.h>
+ #include <stdatomic.h>
+ 
++
++/*
+ #define PSLAB_POOL_SIG "PMCH"
+ #define PSLAB_POOL_SIG_SIZE 4
+ #define PSLAB_POOL_VER_SIZE 12
+@@ -15,14 +18,13 @@
+ 
+ #pragma pack(1)
+ 
+-/* persistent slab pool */
+ typedef struct {
+     char        signature[PSLAB_POOL_SIG_SIZE];
+-    uint32_t    length; /* 8 bytes aligned */
++    uint32_t    length; 
+     char        version[PSLAB_POOL_VER_SIZE];
+     uint8_t     reserved;
+     uint8_t     checksum[2];
+-    atomic_uint_fast8_t     valid;  /* not checksumed */
++    atomic_uint_fast8_t     valid;  
+ 
+     uint64_t    process_started;
+     uint32_t    flush_time[2];
+@@ -38,11 +40,11 @@ typedef struct {
+ #define PSLAB_CHUNK 4
+ 
+ typedef struct {
+-    atomic_uint_fast8_t     id;
+-    uint8_t     flags;       /* non-persistent */
+-    uint8_t     reserved[6]; /* make slab[] 8 bytes aligned */
++    atomic_uint_fast8_t     id; // slab class id
++    uint8_t     flags;       // non-persistent
++    uint8_t     reserved[6]; // make slab[] 8 bytes aligned
+     uint32_t    size;
+-    uint8_t     slab[];
++    uint8_t     slab[]; // sizeof数组名, 计算的是整个数组的存储大小
+ } pslab_t;
+ 
+ #pragma pack()
+@@ -65,38 +67,60 @@ typedef struct {
+         _i++, (fp) = PSLAB_NEXT_FRAME(pslab_pool, (fp)))
+ #define PSLAB_WALK_ID() (_i)
+ #define PSLAB_WALK(fp) PSLAB_WALK_FROM((fp), NULL)
++*/
++
++
++
+ 
+ static pslab_pool_t *pslab_pool;
+ static pslab_t *pslab_start, *pslab_end;
+ 
++
++// lxdchange 6
++static pslab_pool_t *dslab_pool;
++static pslab_t *dslab_start, *dslab_end;
++
++
+ uint64_t pslab_addr2off(void *addr) {
+     return ((char *) addr >= (char *) pslab_start) ?
+         (char *) addr - (char *) pslab_start : 0;
+ }
+ 
++#define ADDR_ALIGNED(addr) (((addr) + 256 - 1) & (~255))
++
++
+ #define pslab_off2addr(off) ((off) ? (void *) ((char *)pslab_start + (off)) : NULL)
+ 
+ #define pslab_addr2slab(addr) ((char *) (addr) >= (char *) pslab_start ? \
+     (pslab_t *) ((char *)(addr) - ((char *)(addr) - (char *) pslab_start) % \
+     PSLAB_FRAME_SIZE(pslab_pool)) : NULL)
+ 
+-int pslab_contains(char *p) {
++int pslab_contains(char *p) { // lxdchange 3
+     if (p >= (char *) pslab_start && p < (char *) pslab_end)
+         return 1;
++    if (p >= (char *) dslab_start && p < (char *) dslab_end)
++        return 1;
+     return 0;
+ }
+ 
+ void pslab_use_slab(void *p, int id, unsigned int size) {
++    ////printf("begin, pslab_use_slab\n");
+     pslab_t *fp = PSLAB_SLAB2FRAME(p);
+     fp->size = size;
+-    pmem_member_persist(fp, size);
++    ////printf("pmem_member_persist, pslab_t size\n");
++    pmem_member_persist(fp, size); // lxdchange
++    ////printf("end pmem_member_persist, pslab_t size\n");
+     atomic_store(&fp->id, id);
+-    pmem_member_persist(fp, id);
++    ////printf("pmem_member_persist, pslab_t id\n");
++    pmem_member_persist(fp, id); // lxdchange
++    ////printf("end pmem_member_persist, pslab_t id\n");
++    ////printf("end, pslab_use_slab\n");
+ }
+ 
+ void *pslab_get_free_slab(void *slab) {
++    // printf("begin pslab_get_free_slab\n");
+     static pslab_t *cur = NULL;
+-    pslab_t *fp = PSLAB_SLAB2FRAME(slab);
++    pslab_t *fp = PSLAB_SLAB2FRAME(slab); /* dram slab 到 pmem pslab 的转换, 即包装一下 */
+ 
+     if (fp == NULL)
+         cur = fp;
+@@ -105,10 +129,11 @@ void *pslab_get_free_slab(void *slab) {
+     PSLAB_WALK_FROM(fp, PSLAB_NEXT_FRAME(pslab_pool, cur)) {
+         if (atomic_load(&fp->id) == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0) {
+             cur = fp;
+-            return fp->slab;
++            return fp->slab; /* pmem pslab 到 dram slab 的转换, 即读取一下 */
+         }
+     }
+     cur = NULL;
++    // printf("end pslab_get_free_slab\n");
+     return NULL;
+ }
+ 
+@@ -149,12 +174,13 @@ static void pslab_checksum_update(int sum, int i) {
+ }
+ 
+ void pslab_update_flushtime(uint32_t time) {
++    printf("pslab_update_flushtime function call\n");
+     int i = (atomic_load(&pslab_pool->valid) - 1) ^ 1;
+ 
+     pslab_pool->flush_time[i] = time;
+     pslab_checksum_update(pslab_do_checksum(&time, sizeof (time)), i);
+     pmem_member_flush(pslab_pool, flush_time);
+-    pmem_member_persist(pslab_pool, checksum);
++    pmem_member_persist(pslab_pool, checksum); // lxdchange
+ 
+     atomic_store(&pslab_pool->valid, i + 1);
+     pmem_member_persist(pslab_pool, valid);
+@@ -172,6 +198,8 @@ time_t pslab_process_started(time_t process_started) {
+ }
+ 
+ int pslab_do_recover() {
++    // printf("pslab_do_recover function call\n");
++    // ITEM_LINKED, ITEM_CAS, ITEM_PSLAB (ITEM_CHUNK)
+     pslab_t *fp;
+     uint8_t *ptr;
+     int i, size, perslab;
+@@ -188,7 +216,7 @@ int pslab_do_recover() {
+     }
+ 
+     /* check for linked and chunked slabs and mark all chunks */
+-    PSLAB_WALK(fp) {
++    PSLAB_WALK(fp) { // 以 Frame 为单位进行遍历,  Frame 是对 original memcached 中 slab_page 的进一步封装, Frame = pslab_t + slab_page
+         if (atomic_load(&fp->id) == 0)
+             continue;
+         size = fp->size;
+@@ -197,16 +225,20 @@ int pslab_do_recover() {
+             item *it = (item *) ptr;
+ 
+             if (atomic_load(&it->it_flags) & ITEM_LINKED) {
++                // printf("an item, with ITEM_LINKED");
+                 if (item_is_flushed(it) ||
+                         (it->exptime != 0 && it->exptime <= current_time)) {
+-                    atomic_store(&it->it_flags, ITEM_PSLAB);
++                    atomic_store(&it->it_flags, ITEM_PSLAB); // 准备后续重新挂载到 PSLAB chain 中
++                    ////printf("pmem_member_persist it->it_flags in pslab_do_recover\n");
+                     pmem_member_persist(it, it_flags);
++                    ////printf("end pmem_member_persist\n");
+                 } else {
+                     fp->flags |= PSLAB_LINKED;
+                     if (atomic_load(&it->it_flags) & ITEM_CHUNKED)
+                         fp->flags |= PSLAB_CHUNKED;
+                 }
+             } else if (atomic_load(&it->it_flags) & ITEM_CHUNK) {
++                // printf("here2\n");
+                 ((item_chunk *)it)->head = NULL; /* non-persistent */
+             }
+         }
+@@ -214,6 +246,7 @@ int pslab_do_recover() {
+ 
+     /* relink alive chunks */
+     PSLAB_WALK(fp) {
++        // printf("relink alive chunks\n");
+         if (atomic_load(&fp->id) == 0 || (fp->flags & PSLAB_CHUNKED) == 0)
+             continue;
+ 
+@@ -223,6 +256,7 @@ int pslab_do_recover() {
+             item *it = (item *) ptr;
+ 
+             if ((atomic_load(&it->it_flags) & ITEM_LINKED) && (atomic_load(&it->it_flags) & ITEM_CHUNKED)) {
++                // printf("here3\n");
+                 item_chunk *nch;
+                 item_chunk *ch = (item_chunk *) ITEM_data(it);
+                 ch->head = it;
+@@ -255,12 +289,15 @@ int pslab_do_recover() {
+         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
+             item *it = (item *) ptr;
+             if (atomic_load(&it->it_flags) & ITEM_LINKED) {
++                // printf("relink the item\n");
++                // printf("here5\n");
+                 do_slab_realloc(it, id);
+-                do_item_relink(it, hash(ITEM_key(it), it->nkey));
++                do_item_relink(it, hash(ITEM_key(it), it->nkey)); // PMEM 中非空闲的item, 直接重新挂载
+             } else if ((atomic_load(&it->it_flags) & ITEM_CHUNK) == 0 ||
+                     ((item_chunk *)it)->head == NULL) {
++                // printf("here6\n");
+                 assert((atomic_load(&it->it_flags) & ITEM_CHUNKED) == 0);
+-                do_slabs_free(ptr, 0, id);
++                do_slabs_free(ptr, 0, id); // PMEM 中原来的空闲部分, 还是转换成 dram 挂载到 slabclass id中
+             }
+         }
+     }
+@@ -270,15 +307,24 @@ int pslab_do_recover() {
+ 
+ int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max,
+         int slab_page_size) {
++       ////printf("begin pslab_pre_recover function call\n");
+     size_t mapped_len;
+     int is_pmem;
+     int i;
+-
++    /* lxd modification */
++       ////printf("pmem_map_file in pslab_pre_recover\n");
+     if ((pslab_pool = pmem_map_file(name, 0, PMEM_FILE_EXCL,
+             0, &mapped_len, &is_pmem)) == NULL) {
+         fprintf(stderr, "pmem_map_file failed\n");
+         return -1;
+     }
++
++    int *tmp_pslab_pool = (int *)pslab_pool;
++    int addition  = *tmp_pslab_pool;
++    pslab_pool = (pslab_pool_t *)((char*)pslab_pool + addition);
++    printf("in pre_recover, the pslab_pool address is: %llu\n", (unsigned long long int)pslab_pool);
++
++
+     if (!is_pmem && (pslab_force == false)) {
+         fprintf(stderr, "%s is not persistent memory\n", name);
+         return -1;
+@@ -308,27 +354,96 @@ int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max,
+ 
+     pslab_start = PSLAB_FIRST_FRAME(pslab_pool);
+     pslab_end = (pslab_t *) ((char *) pslab_start + pslab_pool->slab_num
+-       * PSLAB_FRAME_SIZE(pslab_pool));
++        * PSLAB_FRAME_SIZE(pslab_pool));
++
++    ////printf("end pslab_pre_recover function call\n");
+ 
+     return 0;
+ }
+ 
+ bool pslab_force;
+ 
+-int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
+-        uint32_t *slabclass_sizes, int slabclass_num) {
++int pslab_create(char *pool_name, uint64_t pool_size, uint32_t slab_page_size, // settings.slab_page_size, default to 1MB page size
++        uint32_t *slabclass_sizes, int slabclass_num) { // lxdchange 4
++    
++    size_t simu_mapped_len;
++    int simu_is_pmem;
++    simu_pslab_pool_file_path = "/mnt/aep/simu_pool";
++    simu_pslab_pool_size = 32LL * 1024 * 1024 * 1024;
++    simu_aligns = 256;
++    assert(simu_pslab_pool_size > (1024 * 1024));
++    simu_num_chunks = (simu_pslab_pool_size - (1024 * 1024)) / simu_aligns;
++
++
++
++
++    if ((simu_pslab_pool = (char*)pmem_map_file(simu_pslab_pool_file_path, simu_pslab_pool_size,
++            PMEM_FILE_CREATE, 0666, &simu_mapped_len, &simu_is_pmem)) == NULL) {
++        fprintf(stderr, "simu_pmem_map_file failed\n");
++        return -1;
++    }
++    pmem_memset_nodrain(simu_pslab_pool, 0, simu_pslab_pool_size);
++    printf("Init simu_pslab_pool %llu\n", (unsigned long long int)simu_pslab_pool);
++    simu_pslab_pool = (char*)ADDR_ALIGNED((unsigned long long int)simu_pslab_pool);
++    printf("Alig simu_pslab_pool %llu\n", (unsigned long long int)simu_pslab_pool);
++
+ 
++
++    ////printf("begin pslab_create function\n");
++
++    ////printf("The pool_size in pslab_create is: %lu\n", pool_size);
++    ////printf("the pool name is %s, the pool_size is %lu, the slab_page_size is %u, the slabclass_num is %d\n", pool_name, pool_size, slab_page_size, slabclass_num);
+     size_t mapped_len;
+     int is_pmem;
+     uint32_t length;
+     pslab_t *fp;
+     int i;
+ 
++    int alignment = 1; // 0 for not alignment, 1 for alignment;
++    if(alignment == 0){
++        printf("not alignment\n");
++    }
++    else{
++        printf("alignment\n");
++    }
++    
++
+     if ((pslab_pool = pmem_map_file(pool_name, pool_size,
+             PMEM_FILE_CREATE, 0666, &mapped_len, &is_pmem)) == NULL) {
+         fprintf(stderr, "pmem_map_file failed\n");
+         return -1;
+     }
++    dslab_pool = (pslab_pool_t *)((char*)malloc(pool_size));
++    memset(dslab_pool, 0, pool_size);
++    // pool_start = (char*)pslab_pool;
++    printf("Init pslab_pool %llu\n", (unsigned long long int)pslab_pool);
++    printf("Init dslab_pool %llu\n", (unsigned long long int)dslab_pool);
++
++    unsigned long long int pslab_pool_addr = (unsigned long long int)pslab_pool;
++    int addition = PMEM_ALIGN - (pslab_pool_addr % PMEM_ALIGN);
++    if(alignment == 0){ addition = addition + 1; }
++    int *tmp_pslab_pool = (int *)pslab_pool;
++    *tmp_pslab_pool = addition;
++    pslab_pool = (pslab_pool_t *)((char*)pslab_pool + addition);
++    pool_size = pool_size - addition;
++
++
++    
++
++    unsigned long long int dslab_pool_addr = (unsigned long long int)dslab_pool;
++    int addition2 = PMEM_ALIGN - (dslab_pool_addr % PMEM_ALIGN);
++    if(alignment == 0){ addition2 = addition2 + 1; }
++    dslab_pool = (pslab_pool_t *)((char*)dslab_pool + addition2);
++
++    pslab_dslab_offset = (char*)(pslab_pool) - (char*)(dslab_pool);
++
++
++    printf("pslab_pool_at: %llu\n", (unsigned long long int)pslab_pool);
++    printf("dslab_pool_at: %llu\n", (unsigned long long int)dslab_pool);
++    printf("pslab_dslab_off: %llu\n", (unsigned long long int)pslab_dslab_offset);
++
++
++
+     if (!is_pmem && (pslab_force == false)) {
+         fprintf(stderr, "%s is not persistent memory\n", pool_name);
+         return -1;
+@@ -337,25 +452,40 @@ int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
+     length = (sizeof (pslab_pool_t) + sizeof (pslab_pool->slabclass_sizes[0])
+         * slabclass_num + 7) & PSLAB_ALIGN_MASK;
+     pmem_memset_nodrain(pslab_pool, 0, length);
+-
++    printf("length is: %llu\n", (unsigned long long int)length);
+     (void) memcpy(pslab_pool->signature, PSLAB_POOL_SIG, PSLAB_POOL_SIG_SIZE);
+     pslab_pool->length = length;
+     snprintf(pslab_pool->version, PSLAB_POOL_VER_SIZE, VERSION);
+     pslab_pool->slab_page_size = slab_page_size;
+     pslab_pool->slab_num = (pool_size - pslab_pool->length)
+         / PSLAB_FRAME_SIZE(pslab_pool);
++    
++    printf("pslab_fram_size is: %llu\n", (unsigned long long int)PSLAB_FRAME_SIZE(pslab_pool));
++    printf("pslab_t size is: %llu\n", (unsigned long long int)(sizeof(pslab_t)));
++    printf("pslab_pool slab_num is: %llu\n", (unsigned long long int)pslab_pool->slab_num);
+ 
+     pslab_start = PSLAB_FIRST_FRAME(pslab_pool);
+     pslab_end = (pslab_t *) ((char *) pslab_start + pslab_pool->slab_num
+         * PSLAB_FRAME_SIZE(pslab_pool));
++    dslab_start = (pslab_t *)((char*)pslab_start - pslab_dslab_offset);
++    dslab_end   = (pslab_t *)((char*)pslab_end   - pslab_dslab_offset);
++    printf("pslab_start: %llu\n", (unsigned long long int)pslab_start);
++    printf("pslab_end: %llu\n", (unsigned long long int)pslab_end);
++    printf("dslab_start: %llu\n", (unsigned long long int)dslab_start);
++    printf("dslab_end: %llu\n", (unsigned long long int)dslab_end);
++    
+ 
+     PSLAB_WALK(fp) {
+         pmem_memset_nodrain(fp, 0, sizeof (pslab_t));
+     }
++    ////printf("end pmem_memset_nodrain\n");
+ 
+     pslab_pool->slabclass_num = slabclass_num;
+     for (i = 0; i < slabclass_num; i++)
+-        pslab_pool->slabclass_sizes[i] = slabclass_sizes[i];
++    {
++        pslab_pool->slabclass_sizes[i] = slabclass_sizes[i]; // slabclass_sizes 来源于 dump, dump 来源于 DRAM slab settings
++    }
++        
+ 
+     assert(process_started != 0);
+     pslab_pool->process_started = (uint64_t) process_started;
+@@ -363,10 +493,17 @@ int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
+     pslab_checksum_init();
+     pslab_checksum_update(0, 0);
+ 
++    ////printf("pmem_persist pslab_pool in pslab_create\n");
+     pmem_persist(pslab_pool, pslab_pool->length);
++    ////printf("end pmem_persist\n");
+ 
+     atomic_store(&pslab_pool->valid, 1);
++    ////printf("pmem_member_persist pslab_pool->valid in pslab_create\n");
+     pmem_member_persist(pslab_pool, valid);
++    ////printf("end pmem_member_persist\n");
++
++    //// end pslab_create function\n");
+ 
+     return 0;
+ }
++
+diff --git a/pslab.h b/pslab.h
+index 9a98fe4..f185a9d 100755
+--- a/pslab.h
++++ b/pslab.h
+@@ -8,10 +8,81 @@
+ 
+ #include <libpmem.h>
+ 
++
++
++#define PSLAB_POOL_SIG "PMCH"
++#define PSLAB_POOL_SIG_SIZE 4
++#define PSLAB_POOL_VER_SIZE 12
++#define PSLAB_ALIGN_MASK 0xfffffff8
++
++#define PMEM_ALIGN 256
++
++#pragma pack(1)
++
++/* persistent slab pool */
++typedef struct {
++    char        signature[PSLAB_POOL_SIG_SIZE];
++    uint32_t    length; /* 8 bytes aligned */
++    char        version[PSLAB_POOL_VER_SIZE];
++    uint8_t     reserved;
++    uint8_t     checksum[2];
++    atomic_uint_fast8_t     valid;  /* not checksumed */
++
++    uint64_t    process_started;
++    uint32_t    flush_time[2];
++
++    uint32_t    slab_num;
++    uint32_t    slab_page_size;
++    uint32_t    slabclass_num;
++
++    char alignment[127]; // lxdchange
++
++    uint32_t    slabclass_sizes[];
++} pslab_pool_t;
++
++#define PSLAB_LINKED 1
++#define PSLAB_CHUNKED 2
++#define PSLAB_CHUNK 4
++
++typedef struct {
++    atomic_uint_fast8_t     id; /* slab class id */
++    uint8_t     flags;       /* non-persistent */
++    uint8_t     reserved[250]; /* make slab[] 8 bytes aligned */
++    uint32_t    size;
++    uint8_t     slab[]; // sizeof数组名, 计算的是整个数组的存储大小
++} pslab_t;
++
++#pragma pack()
++
++#define PSLAB_FRAME_SIZE(pm) (sizeof (pslab_t) + (pm)->slab_page_size)
++#define PSLAB_FIRST_FRAME(pm) ((pslab_t *)((char *)(pm) + (pm)->length))
++#define PSLAB_NEXT_FRAME(pm, fp) \
++    ((fp) ? (pslab_t *)((char *)(fp) + PSLAB_FRAME_SIZE(pm)) : \
++    PSLAB_FIRST_FRAME(pm))
++#define PSLAB_SLAB2FRAME(slab) \
++    ((slab) ? (pslab_t *)((char *)(slab) - sizeof (pslab_t)) : NULL)
++
++#define PSLAB_WALK_FROM(fp, s) \
++    assert(pslab_start != NULL || ((char *) (s) - (char *) pslab_start) \
++            % PSLAB_FRAME_SIZE(pslab_pool) == 0); \
++    (fp) = (s) ? (s) : pslab_start; \
++    for (int _i = (s) ? ((char *)(s) - (char *) pslab_start) \
++            / PSLAB_FRAME_SIZE(pslab_pool) : 0; \
++        (fp) >= pslab_start && (fp) < pslab_end; \
++        _i++, (fp) = PSLAB_NEXT_FRAME(pslab_pool, (fp)))
++#define PSLAB_WALK_ID() (_i)
++#define PSLAB_WALK(fp) PSLAB_WALK_FROM((fp), NULL)
++
++
++
+ #define	PSLAB_POLICY_DRAM 0
+ #define	PSLAB_POLICY_PMEM 1
+ #define	PSLAB_POLICY_BALANCED 2
+ 
++// // 改动 5
++// extern pslab_t *dslab_start, *dslab_end;
++// extern long long int pslab_dslab_offset;
++
+ #define pmem_member_persist(p, m) \
+     pmem_persist(&(p)->m, sizeof ((p)->m))
+ #define pmem_member_flush(p, m) \
+@@ -21,8 +92,9 @@
+ #define pslab_item_data_persist(it) pmem_persist((it)->data, ITEM_dtotal(it)
+ #define pslab_item_data_flush(it) pmem_flush((it)->data, ITEM_dtotal(it))
+ 
+-int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_size,
+-    uint32_t *slabclass_sizes, int slabclass_num);
++// int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_size,
++//     uint32_t *slabclass_sizes, int slabclass_num);
++int pslab_create(char *pool_name, uint64_t pool_size, uint32_t slab_size, uint32_t *slabclass_sizes, int slabclass_num);
+ int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max, int slab_page_size);
+ int pslab_do_recover(void);
+ time_t pslab_process_started(time_t process_started);
+@@ -35,3 +107,4 @@ uint64_t pslab_addr2off(void *addr);
+ extern bool pslab_force;
+ 
+ #endif
++
+diff --git a/recleanoptane.sh b/recleanoptane.sh
+new file mode 100755
+index 0000000..43d4be0
+--- /dev/null
++++ b/recleanoptane.sh
+@@ -0,0 +1,4 @@
++#!/bin/bash
++
++rm -rf /mnt/aep/pool
++rm -rf /mnt/aep/simu_pool
+diff --git a/remake.sh b/remake.sh
+new file mode 100755
+index 0000000..013947c
+--- /dev/null
++++ b/remake.sh
+@@ -0,0 +1,7 @@
++#!/bin/bash
++
++rm -rf /mnt/aep/pool
++rm -rf /mnt/aep/simu_pool
++
++make clean
++make
+diff --git a/slabs.c b/slabs.c
+index ee2a0cb..e2938ca 100755
+--- a/slabs.c
++++ b/slabs.c
+@@ -26,6 +26,7 @@
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <time.h>
+ #include <string.h>
+ #include <signal.h>
+ #include <assert.h>
+@@ -70,6 +71,7 @@ static void *storage  = NULL;
+  * Access to the slab allocator is protected by this lock
+  */
+ static pthread_mutex_t slabs_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_mutex_t slabs_lock_copy = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_mutex_t slabs_rebalance_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+ /*
+@@ -118,6 +120,9 @@ unsigned int slabs_clsid(const size_t size) {
+  * accordingly.
+  */
+ void slabs_init(const size_t limit, const double factor, const bool prealloc, const uint32_t *slab_sizes) {
++
++    ////printf("slabs_init function call, memory limit is %d, increase factor is %f, prealloc is %d\n", (int)limit, factor, prealloc);
++
+     int i = POWER_SMALLEST - 1;
+     unsigned int size = sizeof(item) + settings.chunk_size;
+ 
+@@ -182,7 +187,44 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc, co
+ }
+ 
+ #ifdef PSLAB
++int get_slabclass_perslab(int id){
++    return slabclass[id].perslab;
++}
++
++int get_slabclass_chunksize(void *item_ptr){
++    assert(item_ptr != NULL);
++    item *cur_item = (item*)item_ptr;
++    size_t slabclassid = cur_item->slabs_clsid;
++    size_t slabclass_chunksize = slabclass[slabclassid].size;
++
++    return slabclass_chunksize;
++}
++
++int get_slabclass_chunknums(void *item_ptr){
++    assert(item_ptr != NULL);
++    item *cur_item = (item*)item_ptr;
++    size_t slabclassid = cur_item->slabs_clsid;
++    size_t slabclass_perslab = slabclass[slabclassid].perslab;
++
++    return slabclass_perslab;
++}
++void* get_slabclass_slabpage_ptr(void *item_ptr){
++    assert(item_ptr != NULL);
++    item *cur_item = (item*)item_ptr;
++    size_t slabclassid = cur_item->slabs_clsid;
++    slabclass_t *p = &slabclass[slabclassid];
++    unsigned int num_slabs = p->slabs;
++
++    return (void*)(p->slab_list[num_slabs-1]);
++}
++
++
++
++
+ int slabs_dump_sizes(uint32_t *slab_sizes, int max) {
++       ////printf("slab_dump_sizes function call, to copy slabclass size to pslab slabclass size\n");
++    ////printf("power largest is: %d\n", power_largest);
++    ////printf("power largest is: %d\n", POWER_SMALLEST);
+     int num = power_largest + 1 - POWER_SMALLEST;
+     slabclass_t *p = &slabclass[POWER_SMALLEST];
+ 
+@@ -197,6 +239,7 @@ int slabs_dump_sizes(uint32_t *slab_sizes, int max) {
+ #endif
+ 
+ void slabs_prefill_global(void) {
++    /* 使用 pre_allocate 的内存持续填充 slabclass[0] */
+     void *ptr;
+     slabclass_t *p = &slabclass[0];
+     int len = settings.slab_page_size;
+@@ -211,13 +254,21 @@ void slabs_prefill_global(void) {
+ 
+ #ifdef PSLAB
+ void slabs_prefill_global_from_pmem(void) {
++       ////printf("begin slabs_prefill_global_from_pmem\n");
+     void *ptr = NULL;
+-    slabclass_t *p = &slabclass[SLAB_GLOBAL_PAGE_POOL_PMEM];
++    slabclass_t *p = &slabclass[SLAB_GLOBAL_PAGE_POOL_PMEM]; /* equals 1 */
++
++    int count = 0;
+ 
+-    while ((ptr = pslab_get_free_slab(ptr)) != NULL) {
++    while ((ptr = pslab_get_free_slab(ptr)) != NULL) { // 获取到的 slab 位于 pmem 的 pslab->slab 中, 即可按照 dram slab 进行管理
++        count++;
+         grow_slab_list(SLAB_GLOBAL_PAGE_POOL_PMEM);
+         p->slab_list[p->slabs++] = ptr;
+     }
++
++    ////printf("call pslab_get_free_slab for %d times\n", count);
++
++    ////printf("end slabs_prefill_global_from_pmem\n");
+ }
+ #endif
+ 
+@@ -243,7 +294,7 @@ static void slabs_preallocate (const unsigned int maxslabs) {
+     }
+ }
+ 
+-static int grow_slab_list (const unsigned int id) {
++static int grow_slab_list (const unsigned int id) { /* id is slab_class_id */
+     slabclass_t *p = &slabclass[id];
+     if (p->slabs == p->list_size) {
+         size_t new_size =  (p->list_size != 0) ? p->list_size * 2 : 16;
+@@ -255,13 +306,17 @@ static int grow_slab_list (const unsigned int id) {
+     return 1;
+ }
+ 
+-static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
++static void split_slab_page_into_freelist(char *ptr, const unsigned int id) { // lxdchange 1
++    // printf("split_slab_page_into_freelist function call, call many times (slabclass_t->perslab) of do_slabs_free function\n");
++    
+     slabclass_t *p = &slabclass[id];
+     int x;
+     for (x = 0; x < p->perslab; x++) {
+-        do_slabs_free(ptr, 0, id);
++        // printf("when calling do_slabs_free, the ptr is %llu\n", (unsigned long long int)ptr);
++        do_slabs_free(ptr, 0, id); // 调用 do_slabs_free
+         ptr += p->size;
+     }
++
+ }
+ 
+ #ifdef PSLAB
+@@ -269,6 +324,8 @@ static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
+     get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL)
+ 
+ static void *get_page_from_global_pool_by_id(const unsigned int id) {
++       ////printf("begin get_page_from_global_pool_by_id function\n");
++
+     slabclass_t *p = &slabclass[id];
+     assert((id == SLAB_GLOBAL_PAGE_POOL) || (id == SLAB_GLOBAL_PAGE_POOL_PMEM));
+ #else
+@@ -277,18 +334,99 @@ static void *get_page_from_global_pool(void) {
+     slabclass_t *p = &slabclass[SLAB_GLOBAL_PAGE_POOL];
+ #endif
+     if (p->slabs < 1) {
++           ////printf("There is no free slabs in global_page_pool, return!\n");
+         return NULL;
+     }
+     char *ret = p->slab_list[p->slabs - 1];
+     p->slabs--;
++       ////printf("Successfully get free slab pages in global_page_pool, return!\n");
++
++       ////printf("end get_page_from_global_pool_by_id function\n");
++    return ret;
++}
++
++
++
++void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, unsigned long long int slots_sizes){
++    char *pm_ptr = get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL_PMEM);
++    pmem_memcpy_persist(pm_ptr, (char*)ptr, slots_sizes);
++    pslab_use_slab(pm_ptr, id, size);
++}
++
++void *get_pmem_page(unsigned int id){
++    // printf("get pmem page function call\n");
++
++    int cls_id = id- 2;
++    unsigned long long int size = mem_slab_pool[cls_id]->slot_size;
++    unsigned long long int cached_size = settings.slab_page_size / size;
++    // unsigned long long int cached_size = 1024;
++    // unsigned long long int cached_size = 1;
++
++    pthread_mutex_lock(&slabs_lock_copy);
++
++
++    if(pmem_slab_pool[cls_id]->cur_addr == NULL || (pmem_slab_pool[cls_id]->used_slots + cached_size > pmem_slab_pool[cls_id]->total_slots)){
++
++        slabclass_t *p = &slabclass[SLAB_GLOBAL_PAGE_POOL_PMEM];
++        if (p->slabs < 1) {
++            /*
++            printf("p->slabs: %d\n", (int)p->slabs);
++            printf("the pmem slab page is not enough\n");
++            size_t reassign = slabs_reassign(cls_id, SLAB_GLOBAL_PAGE_POOL_PMEM);
++            switch(reassign){
++                case REASSIGN_OK:
++                    printf("reassign ok\n");
++                    break;
++                case REASSIGN_RUNNING:
++                    printf("reassign running\n");
++                    break;
++                case REASSIGN_BADCLASS:
++                    printf("reassign bad class\n");
++                    break;
++                case REASSIGN_NOSPARE:
++                    printf("reassign nospare\n");
++                    break;
++                case REASSIGN_SRC_DST_SAME:
++                    printf("reassign src dst same\n");
++                    break;
++                default:
++                    printf("reassign default\n");
++            }
++            */
++            printf("p->slabs: %d, no more slab pages\n", (int)p->slabs);
++            pthread_mutex_unlock(&slabs_lock_copy);
++            return NULL;
++        }
++
++        // int res = grow_slab_list(id);
++        // if(res == 0){ printf("grow slab list error\n"); }
++        // slabclass_t *cur_p = &slabclass[id];
++        // cur_p->slab_list[p->slabs++] = p->slab_list[p->slabs - 1];
++
++        pmem_slab_pool[cls_id]->cur_addr   = p->slab_list[p->slabs - 1];
++        pmem_slab_pool[cls_id]->used_slots = 0;
++        p->slabs--;
++
++        // printf("the pmem_slab_pool addr is: %llu\n", (unsigned long long int)pmem_slab_pool[cls_id]->cur_addr);
++    }
++
++    char *ret = pmem_slab_pool[cls_id]->cur_addr;
++    pmem_slab_pool[cls_id]->cur_addr   = pmem_slab_pool[cls_id]->cur_addr + cached_size * slabclass[id].size;
++    pmem_slab_pool[cls_id]->used_slots = pmem_slab_pool[cls_id]->used_slots + cached_size;
++
++    pthread_mutex_unlock(&slabs_lock_copy);
++    // printf("get pmem page function call over\n");
+     return ret;
+ }
+ 
++
++
+ #ifdef PSLAB
+ static int do_slabs_newslab_from_dram(const unsigned int id) {
+ #else
+ static int do_slabs_newslab(const unsigned int id) {
+ #endif
++       ////printf("do_slabs_new_slab(_from_dram) function call\n");
+     slabclass_t *p = &slabclass[id];
+     slabclass_t *g = &slabclass[SLAB_GLOBAL_PAGE_POOL];
+     int len = (settings.slab_reassign || settings.slab_chunk_size_max != settings.slab_page_size)
+@@ -298,6 +436,7 @@ static int do_slabs_newslab(const unsigned int id) {
+ 
+     if ((mem_limit == 0) || (mem_malloced + len > mem_limit && p->slabs > 0
+          && g->slabs == 0)) {
++           ////printf("do_slabs_newslab(from_dram) return due to mem_limit reached\n");
+         mem_limit_reached = true;
+         MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
+         return 0;
+@@ -329,23 +468,55 @@ int do_slabs_renewslab(const unsigned int id, char *ptr) {
+     return 1;
+ }
+ 
+-static int do_slabs_newslab_from_pmem(const unsigned int id) {
++static int do_slabs_newslab_from_pmem(const unsigned int id) { // 核心操作
++    
++    // printf("begin, do_slabs_newslab function\n");
++
++    /* 简单从 SLAB_GLOBAL_PAGE_POOL_PMEM 这一大的持久内存池中摘取内存 */
++
+     slabclass_t *p = &slabclass[id];
+     char *ptr;
+ 
++
++    // char *d_addr = p->slab_list[p->slabs-1];
++    // char *p_addr = (char*)d_addr + pslab_dslab_offset; 
++    // pmem_memcpy_persist((char*)p_addr, (char*)d_addr, p->size * p->perslab);
++
++
+     if ((grow_slab_list(id) == 0) ||
+-        ((ptr = get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL_PMEM))
++        ((ptr = get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL_PMEM)) // 只是返回之前预分配的一个地址 
+         == NULL)) {
+-//        MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
++       MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
++           ////printf("Can not get free memory space from pmem global page pool!\n");
+         return 0;
+     }
+ 
+-    pmem_memset_persist(ptr, 0, settings.slab_page_size);
+-    split_slab_page_into_freelist(ptr, id);
++    // unsigned long long int offset = (char*)ptr - (char*)pool_start;
++    // printf("offset is: %llu, is it can be divided by 256 %llu\n", offset, offset%256);
++
++    // printf("ptr is: %llu, is it can be divided by 256 %llu\n", ((unsigned long long int)ptr), ((unsigned long long int)ptr)%256);
++    // if(pslab_contains(ptr)){ printf("ptr is in pmem\n"); }
++    ////printf("pmem_memset_persist settings.slab_page_size\n");
++    pmem_memset_persist(ptr, 0, settings.slab_page_size); // 持久化一整个 slab_page // // 得到的仍然是 PMEM 的指针 // 核心操作
++    ////printf("end pmem_memset_persist settings.slab_page_size\n");
++
++    // PMEM 到 DRAM 的转换
++    split_slab_page_into_freelist(ptr, id); // 由此开始挂载到 slabclass 中
++// #ifdef PSLAB
++//     char *dram_ptr = ptr - pslab_dslab_offset; // lxdchange // 由此开始挂载到 slabclass 中
++//     p->slab_list[p->slabs++] = dram_ptr;
++//     // printf("pmem link slab page: %llu\n", (unsigned long long int)dram_ptr);
++// #else
++//     p->slab_list[p->slabs++] = ptr;
++// #endif
+ 
+     p->slab_list[p->slabs++] = ptr;
+-//    MEMCACHED_SLABS_SLABCLASS_ALLOCATE(id);
+-    pslab_use_slab(ptr, id, p->size);
++    // pslab_use_slab(dram_ptr, id, p->size);
++    pslab_use_slab(ptr, id, p->size); // lxdchange
++
++
++    MEMCACHED_SLABS_SLABCLASS_ALLOCATE(id);
++    ////printf("end, do_slabs_newslab function\n");
+ 
+     return 1;
+ }
+@@ -356,23 +527,43 @@ static int (*newslabs_funcs[])(const unsigned int) = {
+ };
+ 
+ static int slabs_next_src;
+-void slabs_update_policy() {
++void slabs_update_policy() { /* 控制使用哪一块内存 */
++    ////printf("begin slabs_update_policy\n");
+     if (settings.pslab_size == 0)
++    {
++           ////printf("slabs next src is: DRAM\n");
+         slabs_next_src = PSLAB_POLICY_DRAM;
++    }
+     else if (mem_limit == 0)
++    {
++           ////printf("slabs next src is PMEM\n");
+         slabs_next_src = PSLAB_POLICY_PMEM;
++    }
+     if (settings.pslab_policy == PSLAB_POLICY_BALANCED)
++    {
++           ////printf(", slabs next src is DRAM\n");
+         slabs_next_src = PSLAB_POLICY_DRAM;
++    }
+     else
++    {
+         slabs_next_src = settings.pslab_policy;
++    }   
++    ////printf("end slabs_update_policy\n");
+ }
+ 
+-static int do_slabs_newslab(const unsigned int id) {
++static int do_slabs_newslab(const unsigned int id) { // 会对持久内存做改动, 在 spilt 的时候, 调用 do_slabs_free() 函数
++       ////printf("do_slabs_newslab function call\n");
+     int src = slabs_next_src;
+     int ret;
+ 
++    // if(slabs_next_src == PSLAB_POLICY_DRAM){ printf("slabs_next_src==0, choose dram\n"); }
++    // else if(slabs_next_src == PSLAB_POLICY_PMEM){ printf("slabs_next_src==1, choose pmem\n"); }
++
++    // if(src == 0){ printf("src==0, choose dram\n"); }
++    // else if(src == 1){ printf("src==1, choose pmem\n"); }
++
+     if ((ret = newslabs_funcs[src](id)) == 0) {
+-        src ^= 1;
++        src ^= 1; /* 异或运算符 */
+         ret = newslabs_funcs[src](id);
+     }
+ 
+@@ -385,6 +576,8 @@ static int do_slabs_newslab(const unsigned int id) {
+ /*@null@*/
+ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_bytes,
+         unsigned int flags) {
++    
++    ////printf("begin,  do_slabs_alloc function\n");
+     slabclass_t *p;
+     void *ret = NULL;
+     item *it = NULL;
+@@ -403,16 +596,17 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
+     /* fail unless we have space at the end of a recently allocated page,
+        we have something on our freelist, or we could allocate a new page */
+     if (p->sl_curr == 0 && flags != SLABS_ALLOC_NO_NEWPAGE) {
+-        do_slabs_newslab(id);
++        do_slabs_newslab(id); /* 如果是持久内存，就包含了持久化的操作 */ // 已经完成了内存地址转换
+     }
+ 
+     if (p->sl_curr != 0) {
+-        /* return off our freelist */
+         it = (item *)p->slots;
++        // printf("the item address in do_slabs_alloc is %llu\n", (unsigned long long int)it);
++        // printf("After call do_slabs_newslab, Item Stat in do_slabs_alloc\n");
++        // print_item_stat(it);
++
+         p->slots = it->next;
+         if (it->next) it->next->prev = 0;
+-        /* Kill flag and initialize refcount here for lock safety in slab
+-         * mover's freeness detection. */
+         it->it_flags &= ~ITEM_SLABBED;
+         it->refcount = 1;
+         p->sl_curr--;
+@@ -421,17 +615,25 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
+         ret = NULL;
+     }
+ 
++
+     if (ret) {
+         p->requested += size;
+         MEMCACHED_SLABS_ALLOCATE(size, id, p->size, ret);
+     } else {
+         MEMCACHED_SLABS_ALLOCATE_FAILED(size, id);
+     }
++    
++
++    ////printf("At the end of do_slabs_alloc, Item Stat in do_slabs_alloc\n");
++    ////print_item_stat((item*)ret);
++
++    ////printf("end,  do_slabs_alloc function\n");
+ 
+     return ret;
+ }
+ 
+ void do_slab_realloc(item *it, unsigned int id) {
++    ////printf("do_slab_realloc function call\n");
+     slabclass_t *p = &slabclass[id];
+ 
+     assert(it->it_flags & ITEM_LINKED);
+@@ -455,13 +657,16 @@ void do_slab_realloc(item *it, unsigned int id) {
+ }
+ 
+ static void do_slabs_free_chunked(item *it, const size_t size) {
++
++    printf("do_slabs_free_chunked function call\n");
++
+     item_chunk *chunk = (item_chunk *) ITEM_data(it);
+     slabclass_t *p;
+ 
+ #ifdef PSLAB
+     if (it->it_flags & ITEM_PSLAB) {
+         it->it_flags = ITEM_SLABBED | ITEM_PSLAB;
+-        pmem_member_persist(it, it_flags);
++        // pmem_member_persist(it, it_flags); // lxdchange
+     } else
+ #endif
+     it->it_flags = ITEM_SLABBED;
+@@ -521,29 +726,44 @@ static void do_slabs_free_chunked(item *it, const size_t size) {
+ #ifndef PSLAB
+ static
+ #endif
+-void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
++void do_slabs_free(void *ptr, const size_t size, unsigned int id) { // lxdchange 2
++    // printf("do_slabs_free function call\n");
++    //#print_item_stat((item*)ptr);
++
+     slabclass_t *p;
+     item *it;
+ 
+     assert(id >= POWER_SMALLEST && id <= power_largest);
+     if (id < POWER_SMALLEST || id > power_largest)
+         return;
+-
++    
+     MEMCACHED_SLABS_FREE(size, id, ptr);
+     p = &slabclass[id];
+ 
++// #ifdef PSLAB
++//         char *dram_ptr = (char *)ptr - pslab_dslab_offset;
++//         it = (item *)dram_ptr;
++// #else
++//     it = (item *)ptr;
++// #endif
++
+     it = (item *)ptr;
+     if ((it->it_flags & ITEM_CHUNKED) == 0) {
+ #ifdef EXTSTORE
+         bool is_hdr = it->it_flags & ITEM_HDR;
+ #endif
+-        it->it_flags = ITEM_SLABBED;
++        it->it_flags = ITEM_SLABBED; // setting ITEM_SLABBED is here
+ #ifdef PSLAB
+-        if (pslab_contains((char *)it)) {
+-            it->it_flags |= ITEM_PSLAB;
++        if (pslab_contains((char *)it)) { // 核心操作, 判断申请到的内存空间是否处于 PMEM 
++            // printf("pslab_contains\n");
++            it->it_flags |= ITEM_PSLAB; // serring ITEM_PSLAB is here
+             /* no persist since non-linked items can always be reclaimed */
+         }
+ #endif
++// 
++        //    printf("in do_slabs_free function\n");
++        //#print_item_stat(it);
++
+         it->slabs_clsid = 0;
+         it->prev = 0;
+         it->next = p->slots;
+@@ -561,6 +781,8 @@ void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
+         p->requested -= size;
+ #endif
+     } else {
++        printf("the address is %llu\n", (unsigned long long int)it);
++        printf("get error due to the chunked free\n");
+         do_slabs_free_chunked(it, size);
+     }
+     return;
+@@ -741,14 +963,96 @@ static void memory_release() {
+ 
+ void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
+         unsigned int flags) {
++    // printf("slabs_alloc function call\n");
+     void *ret;
+ 
+-    pthread_mutex_lock(&slabs_lock);
+-    ret = do_slabs_alloc(size, id, total_bytes, flags);
+-    pthread_mutex_unlock(&slabs_lock);
++    int cls_id = id - 2;
++    unsigned long long int cached_size = settings.slab_page_size / size;
++    // unsigned long long int cached_size =1024;
++    // unsigned long long int cached_size = 1;
++
++    int thread_id = *((int*)pthread_getspecific(key));
++
++    struct mem_slab **cur_mem_slab;
++    switch(thread_id){
++        case 0:
++            cur_mem_slab = mem_slab_pool_1;
++            break;
++        case 1:
++            cur_mem_slab = mem_slab_pool_2;
++            break;
++        case 2:
++            cur_mem_slab = mem_slab_pool_3;
++            break;
++        case 3:
++            cur_mem_slab = mem_slab_pool_4;
++            break;
++        case 4:
++            cur_mem_slab = mem_slab_pool_5;
++            break;
++        case 5:
++            cur_mem_slab = mem_slab_pool_6;
++            break;
++        case 6:
++            cur_mem_slab = mem_slab_pool_7;
++            break;
++        case 7:
++            cur_mem_slab = mem_slab_pool_8;
++            break;
++        case 8:
++            cur_mem_slab = mem_slab_pool_9;
++            break;
++        case 9:
++            cur_mem_slab = mem_slab_pool_10;
++            break;
++        case 10:
++            cur_mem_slab = mem_slab_pool_11;
++            break;
++        case 11:
++            cur_mem_slab = mem_slab_pool_12;
++            break;
++        case 12:
++            cur_mem_slab = mem_slab_pool_13;
++            break;
++        case 13:
++            cur_mem_slab = mem_slab_pool_14;
++            break;
++        case 14:
++            cur_mem_slab = mem_slab_pool_15;
++            break;
++        case 15:
++            cur_mem_slab = mem_slab_pool_16;
++            break;
++        default:
++            cur_mem_slab = mem_slab_pool;
++            break;
++    }
++
++    // pthread_mutex_lock(&slabs_lock);
++    // ret = do_slabs_alloc(size, id, total_bytes, flags);
++
++    ret = cur_mem_slab[cls_id]->cur_addr;
++    cur_mem_slab[cls_id]->cur_addr   = cur_mem_slab[cls_id]->cur_addr + cur_mem_slab[cls_id]->slot_size;
++    cur_mem_slab[cls_id]->used_slots = cur_mem_slab[cls_id]->used_slots + 1;
++
++    
++    if(cur_mem_slab[cls_id]->used_slots == cached_size){
++        cur_mem_slab[cls_id]->cur_addr   = cur_mem_slab[cls_id]->start_addr;
++        cur_mem_slab[cls_id]->used_slots = 0;
++    }
++
++
++    // pthread_mutex_unlock(&slabs_lock);
+     return ret;
+ }
+ 
++
++
++
++
++
++
++
+ void slabs_free(void *ptr, size_t size, unsigned int id) {
+     pthread_mutex_lock(&slabs_lock);
+     do_slabs_free(ptr, size, id);
+@@ -1211,6 +1515,7 @@ static int slab_rebalance_move(void) {
+ }
+ 
+ static void slab_rebalance_finish(void) {
++       ////printf("slab_rebalance_finish function call\n");
+     slabclass_t *s_cls;
+     slabclass_t *d_cls;
+     int x;
+@@ -1376,10 +1681,10 @@ static enum reassign_result_type do_slabs_reassign(int src, int dst) {
+         dst < SLAB_GLOBAL_PAGE_POOL || dst > power_largest)
+         return REASSIGN_BADCLASS;
+ 
+-    pthread_mutex_lock(&slabs_lock);
+-    if (slabclass[src].slabs < 2)
+-        nospare = true;
+-    pthread_mutex_unlock(&slabs_lock);
++    // pthread_mutex_lock(&slabs_lock);
++    // if (slabclass[src].slabs < 2)
++    //     nospare = true;
++    // pthread_mutex_unlock(&slabs_lock);
+     if (nospare)
+         return REASSIGN_NOSPARE;
+ 
+diff --git a/slabs.h b/slabs.h
+index 087e125..5ab2cb6 100755
+--- a/slabs.h
++++ b/slabs.h
+@@ -24,6 +24,10 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc, co
+ void slabs_prefill_global(void);
+ 
+ #ifdef PSLAB
++int get_slabclass_chunksize(void *item_ptr);
++int get_slabclass_chunknums(void *item_ptr);
++void* get_slabclass_slabpage_ptr(void *item_ptr);
++int get_slabclass_perslab(int id);
+ int slabs_dump_sizes(uint32_t *slab_sizes, int max);
+ void slabs_prefill_global_from_pmem(void);
+ void slabs_update_policy(void);
+@@ -32,6 +36,15 @@ void do_slab_realloc(item *it, unsigned int id);
+ void do_slabs_free(void *ptr, const size_t size, unsigned int id);
+ #endif
+ 
++void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, unsigned long long int slots_nums);
++
++void *get_pmem_page(unsigned int id);
++
++struct mem_pair{
++    char *dram_ptr;
++    char *pmem_ptr;
++};
++
+ /**
+  * Given object size, return id to use when allocating/freeing memory for object
+  * 0 means error: can't store such a large object
+@@ -43,6 +56,8 @@ unsigned int slabs_clsid(const size_t size);
+ #define SLABS_ALLOC_NO_NEWPAGE 1
+ void *slabs_alloc(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
+ 
++// struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
++
+ /** Free previously allocated object */
+ void slabs_free(void *ptr, size_t size, unsigned int id);
+ 
+diff --git a/thread.c b/thread.c
+index df05d5f..51ec9bc 100755
+--- a/thread.c
++++ b/thread.c
+@@ -17,8 +17,12 @@
+ #include <atomic.h>
+ #endif
+ 
++// #include "hash.h"
++
+ #define ITEMS_PER_ALLOC 64
+ 
++static pthread_mutex_t thread_index_init_lock = PTHREAD_MUTEX_INITIALIZER;
++
+ /* An item in the connection queue. */
+ enum conn_queue_item_modes {
+     queue_new_conn,   /* brand new connection. */
+@@ -356,6 +360,18 @@ static void setup_thread(LIBEVENT_THREAD *me) {
+  * Worker thread: main event loop
+  */
+ static void *worker_libevent(void *arg) {
++
++    
++
++    pthread_mutex_lock(&thread_index_init_lock);
++    int tmp_local = (int)atomic_load(&local);
++    pthread_setspecific(key, &tmp_local);
++    printf("thread id is: %llu, used for srand, assign id is: %d\n", (unsigned long long int)pthread_self(), tmp_local);
++    thread_index[tmp_local] = pthread_self();
++    atomic_store(&local, tmp_local + 1);
++    pthread_mutex_unlock(&thread_index_init_lock);
++
++    srand((unsigned long long int)pthread_self());
+     LIBEVENT_THREAD *me = arg;
+ 
+     /* Any per-thread setup can happen here; memcached_thread_init() will block until
+@@ -383,6 +399,8 @@ static void *worker_libevent(void *arg) {
+  * input arrives on the libevent wakeup pipe.
+  */
+ static void thread_libevent_process(int fd, short which, void *arg) {
++    //    printf("thread_libevent_process function call\n");
++
+     LIBEVENT_THREAD *me = arg;
+     CQ_ITEM *item;
+     char buf[1];
+@@ -403,7 +421,8 @@ static void thread_libevent_process(int fd, short which, void *arg) {
+             break;
+         }
+         switch (item->mode) {
+-            case queue_new_conn:
++            case queue_new_conn: // init_state: conn_new_cmd
++                //    printf("will call conn_new in thread_libevent_process with state queue_new_conn\n");
+                 c = conn_new(item->sfd, item->init_state, item->event_flags,
+                                    item->read_buffer_size, item->transport,
+                                    me->base);
+@@ -455,6 +474,9 @@ static int last_thread = -1;
+  */
+ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
+                        int read_buffer_size, enum network_transport transport) {
++    
++    //    printf("dispatch_conn_new function call\n");
++
+     CQ_ITEM *item = cqi_new();
+     char buf[1];
+     if (item == NULL) {
+@@ -480,7 +502,7 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
+     cq_push(thread->new_conn_queue, item);
+ 
+     MEMCACHED_CONN_DISPATCH(sfd, thread->thread_id);
+-    buf[0] = 'c';
++    buf[0] = 'c'; // a mark
+     if (write(thread->notify_send_fd, buf, 1) != 1) {
+         perror("Writing to thread notify pipe");
+     }
+@@ -533,6 +555,7 @@ void sidethread_conn_close(conn *c) {
+  * Allocates a new item.
+  */
+ item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
++    //    printf("item_alloc function call\n");
+     item *it;
+     /* do_item_alloc handles its own locks */
+     it = do_item_alloc(key, nkey, flags, exptime, nbytes);
+@@ -582,6 +605,7 @@ int item_link(item *item) {
+  * needed.
+  */
+ void item_remove(item *item) {
++    // printf("item_remove function call\n");
+     uint32_t hv;
+     hv = hash(ITEM_key(item), item->nkey);
+ 
+@@ -639,6 +663,8 @@ enum store_item_type store_item(item *item, int comm, conn* c) {
+     ret = do_store_item(item, comm, c, hv);
+     item_unlock(hv);
+     return ret;
++
++    // return STORED;
+ }
+ 
+ /******************************* GLOBAL STATS ******************************/
