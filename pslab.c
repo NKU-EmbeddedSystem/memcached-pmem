@@ -74,7 +74,7 @@ static pslab_pool_t *pslab_pool;
 static pslab_t *pslab_start, *pslab_end;
 
 // lxdchange 6
-static pslab_pool_t *dslab_pool;
+/* static pslab_pool_t *dslab_pool; */
 static pslab_t *dslab_start, *dslab_end;
 
 uint64_t pslab_addr2off(void *addr) {
@@ -429,12 +429,13 @@ int pslab_create(char *pool_name, uint64_t pool_size,
     fprintf(stderr, "pmem_map_file failed\n");
     return -1;
   }
+#if false
   dslab_pool = (pslab_pool_t *)((char *)malloc(pool_size));
   memset(dslab_pool, 0, pool_size);
   // pool_start = (char*)pslab_pool;
   printf("Init pslab_pool %llu\n", (unsigned long long int)pslab_pool);
   printf("Init dslab_pool %llu\n", (unsigned long long int)dslab_pool);
-
+#endif
   unsigned long long int pslab_pool_addr = (unsigned long long int)pslab_pool;
   int addition = PMEM_ALIGN - (pslab_pool_addr % PMEM_ALIGN);
   if (alignment == 0) {
@@ -445,6 +446,7 @@ int pslab_create(char *pool_name, uint64_t pool_size,
   pslab_pool = (pslab_pool_t *)((char *)pslab_pool + addition);
   pool_size = pool_size - addition;
 
+#if false
   unsigned long long int dslab_pool_addr = (unsigned long long int)dslab_pool;
   int addition2 = PMEM_ALIGN - (dslab_pool_addr % PMEM_ALIGN);
   if (alignment == 0) {
@@ -457,7 +459,7 @@ int pslab_create(char *pool_name, uint64_t pool_size,
   printf("pslab_pool_at: %llu\n", (unsigned long long int)pslab_pool);
   printf("dslab_pool_at: %llu\n", (unsigned long long int)dslab_pool);
   printf("pslab_dslab_off: %llu\n", (unsigned long long int)pslab_dslab_offset);
-
+#endif
   if (!is_pmem && (pslab_force == false)) {
     fprintf(stderr, "%s is not persistent memory\n", pool_name);
     return -1;
