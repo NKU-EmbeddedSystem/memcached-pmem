@@ -347,12 +347,13 @@ static void *get_page_from_global_pool(void) {
   return ret;
 }
 
-void flush_to_optane_pm(void *ptr, int id, unsigned long long int size,
-                        unsigned long long int slots_sizes) {
-  char *pm_ptr = get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL_PMEM);
-  pmem_memcpy_persist(pm_ptr, (char *)ptr, slots_sizes);
-  pslab_use_slab(pm_ptr, id, size);
-}
+/* void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, */
+/*                         unsigned long long int slots_sizes) { */
+/*   char *pm_ptr = get_page_from_global_pool_by_id(SLAB_GLOBAL_PAGE_POOL_PMEM);
+ */
+/*   pmem_memcpy_persist(pm_ptr, (char *)ptr, slots_sizes); */
+/*   pslab_use_slab(pm_ptr, id, size); */
+/* } */
 
 void *get_pmem_page(unsigned int id) {
   // printf("get pmem page function call\n");

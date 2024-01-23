@@ -37,8 +37,8 @@ void do_slab_realloc(item *it, unsigned int id);
 void do_slabs_free(void *ptr, const size_t size, unsigned int id);
 #endif
 
-void flush_to_optane_pm(void *ptr, int id, unsigned long long int size,
-                        unsigned long long int slots_nums);
+/* void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, */
+/*                         unsigned long long int slots_nums); */
 
 void *get_pmem_page(unsigned int id);
 
