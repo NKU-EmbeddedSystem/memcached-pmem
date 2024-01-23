@@ -6686,6 +6686,8 @@ static void usage(void) {
          "(default)\n");
   printf("-I, --max-item-size=<num> adjusts max item size\n"
          "                          (default: 1mb, min: 1k, max: 128m)\n");
+  printf("-G, --slab-size=<num>     slab page size\n"
+         "                          (default 1mb)\n");
 #ifdef ENABLE_SASL
   printf("-S, --enable-sasl         turn on Sasl authentication\n");
 #endif
@@ -7273,6 +7275,7 @@ int main(int argc, char **argv) {
                     "F"   /* Disable flush_all */
                     "X"   /* Disable dump commands */
                     "o:"  /* Extended generic options */
+                    "G:"  /* slab page size(DRAM buffer size)*/
       ;
 
   /* process arguments */
@@ -7339,6 +7342,9 @@ int main(int argc, char **argv) {
       break;
     case 'm':
       settings.maxbytes = ((size_t)atoi(optarg)) * 1024 * 1024;
+      break;
+    case 'G':
+      settings.slab_page_size = settings.slab_page_size * atoi(optarg);
       break;
     case 'M':
       settings.evict_to_free = 0;

@@ -414,7 +414,7 @@ int pslab_create(char *pool_name, uint64_t pool_size,
   size_t mapped_len;
   int is_pmem;
   uint32_t length;
-  pslab_t *fp;
+  /* pslab_t *fp; */
   int i;
 
   int alignment = 1; // 0 for not alignment, 1 for alignment;
@@ -496,7 +496,7 @@ int pslab_create(char *pool_name, uint64_t pool_size,
   printf("dslab_start: %llu\n", (unsigned long long int)dslab_start);
   printf("dslab_end: %llu\n", (unsigned long long int)dslab_end);
 
-  PSLAB_WALK(fp) { pmem_memset_nodrain(fp, 0, sizeof(pslab_t)); }
+  /* PSLAB_WALK(fp) { pmem_memset_persist(fp, 0, sizeof(pslab_t)); } */
   ////printf("end pmem_memset_nodrain\n");
 
   pslab_pool->slabclass_num = slabclass_num;
