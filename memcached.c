@@ -3266,7 +3266,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c,
     if (stored == NOT_STORED && failed_alloc == 0) {
       ////printf("will do 2-2\n");
       if (old_it != NULL) {
-        printf("will call item_replace in do_store_item\n");
+        /* printf("will call item_replace in do_store_item\n"); */
         STORAGE_delete(c->thread->storage, old_it);
         item_replace(old_it, it, hv);
       } else {
