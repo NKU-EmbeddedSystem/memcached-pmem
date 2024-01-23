@@ -1,0 +1,1190 @@
+diff --git a/items.c b/items.c
+index e0c9219..6b82c96 100755
+--- a/items.c
++++ b/items.c
+@@ -206,69 +206,15 @@ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id) {
+ 
+         it = slabs_alloc(ntotal, id, &total_bytes, 0); // 此处不能只申请dram，也要申请pmem才可以
+                                                     //  否则，lru机制即不发挥作用了
+-        if (settings.temp_lru)
+-            total_bytes -= temp_lru_size(id);
+-
+-        if (it == NULL) {
+-            if (lru_pull_tail(id, COLD_LRU, total_bytes, LRU_PULL_EVICT, 0, NULL) <= 0) {
+-                if (settings.lru_segmented) {
+-                    lru_pull_tail(id, HOT_LRU, total_bytes, 0, 0, NULL);
+-                } else {
+-                    break;
+-                }
+-            }
+-        } else {
+-            break;
+-        }
+-    }
+-
+-    if (i > 0) {
+-        pthread_mutex_lock(&lru_locks[id]);
+-        itemstats[id].direct_reclaims += i;
+-        pthread_mutex_unlock(&lru_locks[id]);
+-    }
+-
+-    ////printf("end, do_item_alloc_pull\n");
+-    return it;
+-}
+-
+-
+-
+-
+-struct mem_pair *do_item_alloc_pull_new(const size_t ntotal, const unsigned int id) {
+-    ////printf("begin, do_item_alloc_pull\n");
+-
+-    item *it = NULL;
+-    int i;
+-    struct mem_pair *ret;
+-
+-    for (i = 0; i < 10; i++) {
+-        uint64_t total_bytes;
+-        /* Try to reclaim memory first */
+-        if (!settings.lru_segmented) {
+-            lru_pull_tail(id, COLD_LRU, 0, 0, 0, NULL);
+-        }
+-        
+-        // struct timeval start, end;
+-        // gettimeofday(&start, NULL);
+-        ret = slabs_alloc_new(ntotal, id, &total_bytes, 0); // 此处不能只申请dram，也要申请pmem才可以
+-                                                    //  否则，lru机制即不发挥作用了
+-        // gettimeofday(&end, NULL);
+-        // slab_alloc = slab_alloc + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+-        
+ 
+-        it = (item*)ret->pmem_ptr;
+-        
+-        ((item*)ret->dram_ptr)->it_flags = ITEM_PSLAB;
+-        ((item*)ret->dram_ptr)->refcount = 1;
++        it->it_flags = ITEM_PSLAB;
++        it->refcount = 1;
+ 
+         if (settings.temp_lru)
+             total_bytes -= temp_lru_size(id);
+ 
+-        
+         if (it == NULL) {
+-            // printf("do_item_alloc_pull process lru to free memory\n");
+-            // gettimeofday(&start, NULL);
++            printf("do_item_alloc_pull error\n");
+             if (lru_pull_tail(id, COLD_LRU, total_bytes, LRU_PULL_EVICT, 0, NULL) <= 0) {
+                 if (settings.lru_segmented) {
+                     lru_pull_tail(id, HOT_LRU, total_bytes, 0, 0, NULL);
+@@ -276,28 +222,19 @@ struct mem_pair *do_item_alloc_pull_new(const size_t ntotal, const unsigned int
+                     break;
+                 }
+             }
+-            // gettimeofday(&end, NULL);
+-            // lru_move = lru_move + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+         } else {
+             break;
+         }
+-
+-    }
+-
+-    it = (item*)ret->pmem_ptr;
+-    if(it == NULL){
+-        printf("can not allocate pmem memory, exit\n");
+-        exit(0);
+     }
+ 
+-
+     if (i > 0) {
+         pthread_mutex_lock(&lru_locks[id]);
+         itemstats[id].direct_reclaims += i;
+         pthread_mutex_unlock(&lru_locks[id]);
+     }
+ 
+-    return ret;
++    ////printf("end, do_item_alloc_pull\n");
++    return it;
+ }
+ 
+
+ void item_free(item *it) {
+     // printf("item_free function call\n");
+     size_t ntotal = ITEM_ntotal(it);
+@@ -787,7 +605,7 @@ int do_item_link(item *it, const uint32_t hv) {
+     ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+     // printf("begin assoc_insert, item_linkq, refcount_incr, item_stats_size_add function\n");
+     assoc_insert(it, hv);
+-    item_link_q(it);
++    // item_link_q(it);
+     refcount_incr(it);
+     item_stats_sizes_add(it);
+     // printf("end assoc_insert, item_linkq, refcount_incr, item_stats_size_add function\n");
+diff --git a/items.h b/items.h
+index 8818e64..d1a5bbc 100755
+--- a/items.h
++++ b/items.h
+@@ -21,12 +21,8 @@ uint64_t get_cas_id(void);
+ 
+ /*@null@*/
+ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags, const rel_time_t exptime, const int nbytes);
+-struct mem_pair *do_item_alloc_new(char *key, const size_t nkey, const unsigned int flags, const rel_time_t exptime, const int nbytes);
+ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain);
+ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id);
+-
+-struct mem_pair *do_item_alloc_pull_new(const size_t ntotal, const unsigned int id);
+-
+ void item_free(item *it);
+ bool item_size_ok(const size_t nkey, const int flags, const int nbytes);
+ 
+diff --git a/memcached.c b/memcached.c
+index b234de8..f106e78 100755
+--- a/memcached.c
++++ b/memcached.c
+@@ -37,8 +37,6 @@
+ #include <ctype.h>
+ #include <stdarg.h>
+ 
+-#include "libpmem.h"
+-
+ /* some POSIX systems need the following definition
+  * to get mlockall flags out of sys/mman.h.  */
+ #ifndef _P1003_1B_VISIBLE
+@@ -101,7 +99,6 @@ long long int pslab_dslab_offset;
+ // char *pool_start;
+ 
+ char *simu_pslab_pool;
+-char *simu_dslab_pool;
+ char *simu_pslab_pool_file_path;
+ unsigned long long int simu_pslab_pool_size;
+ unsigned long long int simu_aligns;
+@@ -112,8 +109,6 @@ unsigned long long int simu_cycles;
+ 
+ unsigned long long int pmem_pool_index;
+ 
+-unsigned long long int *simu_index;
+-
+ 
+ struct mem_slab **mem_slab_pool_1;
+ struct mem_slab **mem_slab_pool_2;
+@@ -133,8 +128,6 @@ struct mem_slab **mem_slab_pool_15;
+ struct mem_slab **mem_slab_pool_16;
+ 
+ 
+-#define PTR_ADDR(p) ((unsigned long long int)p)
+-
+ 
+ 
+ 
+@@ -148,16 +141,6 @@ atomic_uint_fast8_t local;
+ pthread_key_t key;
+ 
+ 
+-unsigned long long int network_io = 0;
+-unsigned long long int hash_cal = 0;
+-unsigned long long int hash_find = 0;
+-unsigned long long int link_time = 0;
+-unsigned long long int mem_access = 0;
+-unsigned long long int command_parse = 0;
+-unsigned long long int slab_alloc = 0;
+-unsigned long long int lru_move = 0;
+-
+-
+ static void drive_machine(conn *c);
+ static int new_socket(struct addrinfo *ai);
+ static int try_read_command(conn *c);
+@@ -1265,9 +1248,7 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
+     ////print_item_stat(c->item);
+     assert(c != NULL);
+ 
+-    // item *it = c->item;
+-    struct mem_pair *dram_pmem = c->item;
+-    item *it = (item*)(dram_pmem->dram_ptr);
++    item *it = c->item;
+     int comm = c->cmd; // lxdchange
+     enum store_item_type ret;
+     bool is_valid = false;
+@@ -1436,84 +1417,102 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
+     // int slabclass_id = it->slabs_clsid & MAX_NUMBER_OF_SLAB_CLASSES;
+     
+     int id = it->slabs_clsid;
+-    // printf("the slab class id is: %d\n", id);
+-    int cls_id = id - 2;
+-    unsigned long long int size = mem_slab_pool[cls_id]->slot_size;
+-    // printf("slot size is: %llu\n", size);
+-    // printf("slabclass id is: %d, dram cls id is: %d\n", id, cls_id);
+-    char *pmem_ptr = dram_pmem->pmem_ptr;
+-    // printf("the pmem_ptr is: %llu\n", (unsigned long long int)pmem_ptr);
+ 
++    int cls_id = it->slabs_clsid - 2;
++    unsigned long long int size = mem_slab_pool[cls_id]->slot_size;
++    unsigned long long int cached_size = settings.slab_page_size / size;
++    // unsigned long long int cached_size = 1024;
++    // unsigned long long int cached_size = 1;
+ 
+-    
+-    // 放大 Optane 的影响
+-    // struct timeval start, end;
+-    // gettimeofday(&start, NULL);
+-    // unsigned long long int rand_id = 1;
+-    int write_size = size;
+-    // int write_size = 256;
+     int thread_id = *((int*)pthread_getspecific(key));
+-    // simu_num_chunks = settings.slab_page_size / simu_aligns; // simu_aligns = 256 or 64;
+-    // simu_aligns = (simu_aligns > 256) ? simu_aligns : 256;
+-    simu_aligns = write_size;
+-    simu_num_chunks = (simu_pslab_pool_size - 4096) / simu_aligns;
+-    // unsigned long long int each_chunks = simu_num_chunks / settings.num_threads;
+-    // unsigned long long int base_chunks = each_chunks * thread_id;
+-    // char *dst = (char*)malloc(1024);
+-
+-    // printf("write size: %d\n", write_size);
+-    // printf("thread id: %d\n", thread_id);
+-
+-// 阐明 benchmark 有效性，热点函数
+-// 注意不同线程访问的空间，重叠可能有影响
+-// 96字节吞吐差，192字节吞吐好
+-// optane access size变大，访问粒度对吞吐的影响并不线性增大
+-// 对512字节或1024字节，指令是否有优化
+-// 对512字节或1024字节，sfence指令是否有优化
+-
+-    // printf("num threads: %d\n", (int)settings.num_threads);
+-    // unsigned int seed = (unsigned int)pthread_self();
+-    int repeat = 0; //不添加benchmark
+-    for(int r = 0; r < repeat; r++){
+-        for(unsigned long long int c = 0; c < 4; c++){
+-                // int rand_id = rand_r(&seed) % simu_num_chunks; // simu_num_chunks // 保证 256 byte 对齐 // random范围过大，访存性能很差，memcpy次数减少，会看不出access的性能差异
+-                // printf("thread id is :%llu, rand_id is %d\n", (unsigned long long int)pthread_self(), (int)rand_id);
+-                // rand_id = (rand_id + 1) % simu_num_chunks;
+-                unsigned long long int cur_chunk = (simu_index[thread_id] * settings.num_threads + thread_id)  % simu_num_chunks;
+-                // unsigned long long int cur_chunk = base_chunks + (simu_index[thread_id] % each_chunks);
+-                // printf("pthread_id: %llu, cur_chunk: %llu\n",(unsigned long long int)pthread_self(), (unsigned long long int)cur_chunk);
+-                char *dst = simu_pslab_pool + cur_chunk * simu_aligns; 
+-                // char *dst = simu_pslab_pool + rand_id * simu_aligns;
+-                simu_index[thread_id] = simu_index[thread_id] + 1;
+-                // pmem_memcpy_persist((char*)dst, (char*)it, write_size);
+-                // pmem_memcpy_persist((char*)dst, (char*)it, write_size);
+-                // pmem_memcpy((char*)dst, (char*)it, write_size, PMEM_F_MEM_NONTEMPORAL);
+-                
+-                // pmem_memcpy((char*)dst, (char*)it, write_size, PMEM_F_MEM_WC);
+-                // pmem_memcpy_nodrain((char*)dst, (char*)it, write_size);
+-                memcpy((char*)dst, (char*)it, write_size);
+-                pmem_flush(dst, write_size);
+-
+-                // memcpy((char*)dst, (char*)it, write_size);
+-                // memcpy((char*)dst, (char*)it, write_size);
+-                // pmem_flush(dst, write_size);
++    struct mem_slab **cur_mem_slab;
++    switch(thread_id){
++        case 0:
++            cur_mem_slab = mem_slab_pool_1;
++            break;
++        case 1:
++            cur_mem_slab = mem_slab_pool_2;
++            break;
++        case 2:
++            cur_mem_slab = mem_slab_pool_3;
++            break;
++        case 3:
++            cur_mem_slab = mem_slab_pool_4;
++            break;
++        case 4:
++            cur_mem_slab = mem_slab_pool_5;
++            break;
++        case 5:
++            cur_mem_slab = mem_slab_pool_6;
++            break;
++        case 6:
++            cur_mem_slab = mem_slab_pool_7;
++            break;
++        case 7:
++            cur_mem_slab = mem_slab_pool_8;
++            break;
++        case 8:
++            cur_mem_slab = mem_slab_pool_9;
++            break;
++        case 9:
++            cur_mem_slab = mem_slab_pool_10;
++            break;
++        case 10:
++            cur_mem_slab = mem_slab_pool_11;
++            break;
++        case 11:
++            cur_mem_slab = mem_slab_pool_12;
++            break;
++        case 12:
++            cur_mem_slab = mem_slab_pool_13;
++            break;
++        case 13:
++            cur_mem_slab = mem_slab_pool_14;
++            break;
++        case 14:
++            cur_mem_slab = mem_slab_pool_15;
++            break;
++        case 15:
++            cur_mem_slab = mem_slab_pool_16;
++            break;
++        default:
++            cur_mem_slab = mem_slab_pool;
++            break;
++    }
++
++
++    if(it == NULL || cur_mem_slab == NULL){
++        printf("Pointer error!\n");
++    }
++    unsigned long long int cur_slot = ((char*)it - (char*)(cur_mem_slab[cls_id]->start_addr)) / cur_mem_slab[cls_id]->slot_size + 1;
++    if(cur_slot == cached_size){
++        // flush to persistent memory;
++        // char *pm_ptr = get_pmem_page(SLAB_GLOBAL_PAGE_POOL_PMEM);
++        char *pm_ptr = get_pmem_page(id);
++        if(pm_ptr == NULL){
++            printf("can not get pmem memory\n");
++            exit(0);
++        }
++        // printf("the pmem address is %llu\n", (unsigned long long int)pm_ptr);
++        pmem_memcpy_persist(pm_ptr, (char*)(cur_mem_slab[cls_id]->start_addr), size*cached_size);
++        pslab_use_slab(pm_ptr, id, size);
++        // printf("begin store item\n");
++        // link to hash table and lru list, inc refcount;
++        char *ptr = pm_ptr;
++        for(int i = 0; i < cached_size; i++, ptr+=(cur_mem_slab[cls_id]->slot_size)){
++            item *cur_item = (item*)ptr;
++            ret = store_item(cur_item, comm, c);
++            item_remove(cur_item);
+         }
++        // printf("end store item\n");
++
++        // update mem_slab_pool
++        // mem_slab_pool[cls_id]->cur_addr   = mem_slab_pool[cls_id]->start_addr;
++        // mem_slab_pool[cls_id]->used_slots = 0;
++        // mem_slab_pool[cls_id]->need_flush = 0;
++        // printf("here, pthread_id is: %llu, need to flush is:%d\n", (unsigned long long int)pthread_self(), (int)mem_slab_pool[cls_id]->need_flush);
+     }
+-    // end
+-    // for(unsigned long long int c = 0; c < 4; c++){
+-    //     pmem_memcpy_persist(pmem_ptr, it, size);
+-    // }
+-    //  gettimeofday(&end, NULL);
+-    // mem_access = (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+-    // printf("mem_access_time: %llu\n", mem_access);
+-    
+ 
+-    pmem_memcpy_persist(pmem_ptr, it, size);
+-    // gettimeofday(&end, NULL);
+-    // mem_access = mem_access + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+-    ret = store_item((item*)pmem_ptr, comm, c);
+-    item_remove((item*)pmem_ptr);
+-      
+ 
+ 
+     if (!is_valid) {
+@@ -3181,12 +3180,8 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
+     // printf("begin do_store_item function\n");
+ 
+     char *key = ITEM_key(it);
+-    // struct timeval start, end;
+-    // gettimeofday(&start, NULL);
+     item *old_it = do_item_get(key, it->nkey, hv, c, DONT_UPDATE); // 在没有 link 到 hash 表的时候是查找不到的
+-    // gettimeofday(&end, NULL);
+-    // hash_find = hash_find + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+-        
++    // printf("the address of old_item is %llu\n", (unsigned long long int)old_it);
+     enum store_item_type stored = NOT_STORED;
+ 
+     item *new_it = NULL;
+@@ -3293,18 +3288,12 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
+         if (stored == NOT_STORED && failed_alloc == 0) {
+                ////printf("will do 2-2\n");
+             if (old_it != NULL) {
+-                // printf("will call item_replace in do_store_item\n");
++                printf("will call item_replace in do_store_item\n");
+                 STORAGE_delete(c->thread->storage, old_it);
+                 item_replace(old_it, it, hv);
+-                // do_item_link(it, hv);
+             } else {
+                 // printf("will call item_link in do_store_item\n");
+-                // struct timeval start, end;
+-                // gettimeofday(&start, NULL);
+                 do_item_link(it, hv);
+-                // gettimeofday(&end, NULL);
+-                // link_time = link_time + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+-        
+             }
+ 
+             c->cas = ITEM_get_cas(it);
+@@ -4388,6 +4377,25 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
+ 
+ static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) { // 核心操作，总纲核心操作
+ 
++    // printf("begin process_update_command function\n");
++
++/*
++typedef struct token_s {
++    char *value;
++    size_t length;
++} token_t;
++
++*/
++    // printf("Parsing, the command is as follows\n");
++    // for(size_t i = 0; i < ntokens; i++){
++    //     printf("%s, ", tokens[i].value);
++    // }
++    // printf("\nEnd parsing\n");
++    //// 当前一个 item 的所有信息保存在 DRAM Buffer 中
++
++
++
++
+     char *key;
+     size_t nkey;
+     unsigned int flags;
+@@ -4396,7 +4404,6 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
+     int vlen;
+     uint64_t req_cas_id=0;
+     item *it;
+-    struct mem_pair *dram_pmem;
+ 
+     assert(c != NULL);
+ 
+@@ -4444,16 +4451,47 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
+         stats_prefix_record_set(key, nkey);
+     }
+ 
+-    // it = item_alloc(key, nkey, flags, realtime(exptime), vlen); // 核心操作
+-    dram_pmem = item_alloc_new(key, nkey, flags, realtime(exptime), vlen);
+-    it = (item*)(dram_pmem->dram_ptr);
++    //    printf("will call item_alloc in process_update_command\n");
++    // prototype: item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
++    it = item_alloc(key, nkey, flags, realtime(exptime), vlen); // 核心操作
++
++    if (it == 0) {
++        printf("error in process_update_command\n");
++        enum store_item_type status;
++        if (! item_size_ok(nkey, flags, vlen)) {
++            out_string(c, "SERVER_ERROR object too large for cache");
++            status = TOO_LARGE;
++        } else {
++            out_of_memory(c, "SERVER_ERROR out of memory storing object");
++            status = NO_MEMORY;
++        }
++        LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE,
++                NULL, status, comm, key, nkey, 0, 0);
++        /* swallow the data line */
++        c->write_and_go = conn_swallow;
++        c->sbytes = vlen;
+ 
++        /* Avoid stale data persisting in cache because we failed alloc.
++         * Unacceptable for SET. Anywhere else too? */
++        if (comm == NREAD_SET) {
++            it = item_get(key, nkey, c, DONT_UPDATE);
++            if (it) {
++                item_unlink(it);
++                STORAGE_delete(c->thread->storage, it);
++                item_remove(it);
++            }
++        }
+ 
++        return;
++    }
++    
+     ITEM_set_cas(it, req_cas_id);
+ 
+-    // c->item = it; // dram item or pmem item
+-    c->item = dram_pmem;
++    // printf("the c->item address is %llu\n", (unsigned long long int)it);
++    c->item = it; // dram item or pmem item
++    ////printf("setting conn->ritem in process_update_command, equals to ITEM_data(it)\n");
+     c->ritem = ITEM_data(it);
++    ////printf("setting conn->rlbytes in process_update_command, equals to it->nbytes, means the length of value\n");
+     c->rlbytes = it->nbytes;
+     c->cmd = comm;
+     conn_set_state(c, conn_nread);
+@@ -5006,10 +5044,8 @@ static void process_command(conn *c, char *command) {
+         out_of_memory(c, "SERVER_ERROR out of memory preparing response");
+         return;
+     }
+-    // struct timeval start, end;
+-    // gettimeofday(&start, NULL);
++
+     ntokens = tokenize_command(command, tokens, MAX_TOKENS);
+-    
+     if (ntokens >= 3 &&
+         ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
+          (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
+@@ -5025,9 +5061,6 @@ static void process_command(conn *c, char *command) {
+                 (strcmp(tokens[COMMAND_TOKEN].value, "prepend") == 0 && (comm = NREAD_PREPEND)) ||
+                 (strcmp(tokens[COMMAND_TOKEN].value, "append") == 0 && (comm = NREAD_APPEND)) )) {
+         
+-        // gettimeofday(&end, NULL);
+-        // command_parse = command_parse + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+-    
+         //    printf("will call process_update_command in process_command\n");
+         process_update_command(c, tokens, ntokens, comm, false);
+ 
+@@ -5785,8 +5818,6 @@ static int read_into_chunked_item(conn *c) {
+ 
+ static void drive_machine(conn *c) {
+        ////printf("drive_machine function call\n");
+-    // struct timeval start_here;
+-    // struct timeval end_here;
+     bool stop = false;
+     int sfd;
+     socklen_t addrlen;
+@@ -5877,12 +5908,8 @@ static void drive_machine(conn *c) {
+ 
+         case conn_read:
+                ////printf("drive_machine: conn_read\n");
+-            
+-            // gettimeofday(&start_here, NULL);
+             res = IS_UDP(c->transport) ? try_read_udp(c) : try_read_network(c);
+-            // gettimeofday(&end_here, NULL);
+-            // network_io = network_io + (1000000 * (end_here.tv_sec - start_here.tv_sec) + end_here.tv_usec - start_here.tv_usec);
+-            
++
+             switch (res) {
+             case READ_NO_DATA_RECEIVED:
+                 conn_set_state(c, conn_waiting);
+@@ -5955,15 +5982,15 @@ static void drive_machine(conn *c) {
+                 break;
+             }
+ 
+-            char *dram_ptr = ((struct mem_pair*)c->item)->dram_ptr;
+-
+-            if (!dram_ptr || (((item *)dram_ptr)->it_flags & ITEM_CHUNKED) == 0) {
++            if (!c->item || (((item *)c->item)->it_flags & ITEM_CHUNKED) == 0) {
+                 //#print_item_stat(c->item);
+ #ifdef PSLAB
+-                int is_pslab = dram_ptr && (((item *)dram_ptr)->it_flags & ITEM_PSLAB) ? 1 : 0;
++                int is_pslab = (c->item) && (((item *)c->item)->it_flags & ITEM_PSLAB) ? 1 : 0;
+ #endif
+ 
++                // printf("conn nread, is_pslab is: %d\n", is_pslab);
+ 
++                /* first check if we have leftovers in the conn_read buffer */
+                 if (c->rbytes > 0) {
+                        ////printf("exec memmove in conn_nread\n");
+                     int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
+@@ -5994,11 +6021,7 @@ static void drive_machine(conn *c) {
+                 }
+ 
+                 /*  now try reading from the socket */
+-                // gettimeofday(&start_here, NULL);
+                 res = read(c->sfd, c->ritem, c->rlbytes); // item 初始化为 (item) 的 value data 域
+-                // gettimeofday(&end_here, NULL);
+-                // network_io = network_io + (1000000 * (end_here.tv_sec - start_here.tv_sec) + end_here.tv_usec - start_here.tv_usec);
+-        
+                 if (res > 0) {
+ #ifdef PSLAB
+                     if (is_pslab) // value data flush here
+@@ -6114,7 +6137,6 @@ static void drive_machine(conn *c) {
+              * list for TCP or a two-entry list for UDP).
+              */
+                ////printf("drive_machine: conn_write\n");
+-            // gettimeofday(&start_here, NULL);
+             if (c->iovused == 0 || (IS_UDP(c->transport) && c->iovused == 1)) {
+                 if (add_iov(c, c->wcurr, c->wbytes) != 0) {
+                     if (settings.verbose > 0)
+@@ -6123,9 +6145,6 @@ static void drive_machine(conn *c) {
+                     break;
+                 }
+             }
+-            // gettimeofday(&end_here, NULL);
+-            // network_io = network_io + (1000000 * (end_here.tv_sec - start_here.tv_sec) + end_here.tv_usec - start_here.tv_usec);
+-        
+ 
+             /* fall through... */
+ 
+@@ -6154,13 +6173,9 @@ static void drive_machine(conn *c) {
+             conn_set_state(c, conn_closing);
+             break;
+           }
+-        //   gettimeofday(&start_here, NULL);
+             switch (transmit(c)) {
+             case TRANSMIT_COMPLETE:
+                 if (c->state == conn_mwrite) {
+-                //     gettimeofday(&end_here, NULL);
+-                // network_io = network_io + (1000000 * (end_here.tv_sec - start_here.tv_sec) + end_here.tv_usec - start_here.tv_usec);
+-        
+                     conn_release_items(c);
+                     /* XXX:  I don't know why this wasn't the general case */
+                     if(c->protocol == binary_prot) {
+@@ -6169,18 +6184,12 @@ static void drive_machine(conn *c) {
+                         conn_set_state(c, conn_new_cmd);
+                     }
+                 } else if (c->state == conn_write) {
+-                    // gettimeofday(&end_here, NULL);
+-                // network_io = network_io + (1000000 * (end_here.tv_sec - start_here.tv_sec) + end_here.tv_usec - start_here.tv_usec);
+-        
+                     if (c->write_and_free) {
+                         free(c->write_and_free);
+                         c->write_and_free = 0;
+                     }
+                     conn_set_state(c, c->write_and_go);
+                 } else {
+-                //     gettimeofday(&end_here, NULL);
+-                // network_io = network_io + (1000000 * (end_here.tv_sec - start_here.tv_sec) + end_here.tv_usec - start_here.tv_usec);
+-        
+                     if (settings.verbose > 0)
+                         fprintf(stderr, "Unexpected state %d\n", c->state);
+                     conn_set_state(c, conn_closing);
+@@ -6904,25 +6913,6 @@ static void remove_pidfile(const char *pid_file) {
+ 
+ static void sig_handler(const int sig) {
+     printf("Signal handled: %s.\n", strsignal(sig));
+-    /*
+-    extern unsigned long long int network_io;
+-    extern unsigned long long int hash_cal;
+-    extern unsigned long long int hash_find;
+-    extern unsigned long long int link_time;
+-    extern unsigned long long int mem_access;
+-    extern unsigned long long int command_parse;
+-    extern unsigned long long int slab_alloc;
+-    extern unsigned long long int lru_move;
+-    */
+-    printf("time analysis: \n");
+-    printf("network io: %llu us\n", network_io);
+-    printf("hash cal: %llu us\n", hash_cal);
+-    printf("hash find: %llu us\n", hash_find);
+-    printf("item link: %llu us\n", link_time);
+-    printf("mem access: %llu us\n", mem_access);
+-    printf("command parse: %llu us\n", command_parse);
+-    printf("slab alloc: %llu us\n", slab_alloc);
+-    printf("lru move: %llu us\n", lru_move);
+     exit(EXIT_SUCCESS);
+ }
+ 
+@@ -8252,15 +8242,11 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+         fprintf(stderr, "slabs sizes dump failed\n");
+     }
+ 
+-    int align_size = 256;
+-    printf("mem pool align to %d\n", align_size);
++
+     mem_slab_pool_1  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_1[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_1[a]->start_addr = bytes;
++        mem_slab_pool_1[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_1[a]->cur_addr   = mem_slab_pool_1[a]->start_addr;
+         mem_slab_pool_1[a]->used_slots = 0;
+         mem_slab_pool_1[a]->slot_size  = dump_slab_sizes[a];
+@@ -8270,10 +8256,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_2  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_2[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_2[a]->start_addr = bytes; // 16 threads;
++        mem_slab_pool_2[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_2[a]->cur_addr   = mem_slab_pool_2[a]->start_addr;
+         mem_slab_pool_2[a]->used_slots = 0;
+         mem_slab_pool_2[a]->slot_size  = dump_slab_sizes[a];
+@@ -8283,10 +8266,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_3  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_3[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_3[a]->start_addr = bytes;
++        mem_slab_pool_3[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_3[a]->cur_addr   = mem_slab_pool_3[a]->start_addr;
+         mem_slab_pool_3[a]->used_slots = 0;
+         mem_slab_pool_3[a]->slot_size  = dump_slab_sizes[a];
+@@ -8296,10 +8276,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_4  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_4[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_4[a]->start_addr = bytes;
++        mem_slab_pool_4[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_4[a]->cur_addr   = mem_slab_pool_4[a]->start_addr;
+         mem_slab_pool_4[a]->used_slots = 0;
+         mem_slab_pool_4[a]->slot_size  = dump_slab_sizes[a];
+@@ -8310,10 +8287,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_5  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_5[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_5[a]->start_addr = bytes;
++        mem_slab_pool_5[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_5[a]->cur_addr   = mem_slab_pool_5[a]->start_addr;
+         mem_slab_pool_5[a]->used_slots = 0;
+         mem_slab_pool_5[a]->slot_size  = dump_slab_sizes[a];
+@@ -8323,10 +8297,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_6  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_6[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_6[a]->start_addr = bytes;
++        mem_slab_pool_6[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_6[a]->cur_addr   = mem_slab_pool_6[a]->start_addr;
+         mem_slab_pool_6[a]->used_slots = 0;
+         mem_slab_pool_6[a]->slot_size  = dump_slab_sizes[a];
+@@ -8336,10 +8307,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_7  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_7[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_7[a]->start_addr = bytes;
++        mem_slab_pool_7[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_7[a]->cur_addr   = mem_slab_pool_7[a]->start_addr;
+         mem_slab_pool_7[a]->used_slots = 0;
+         mem_slab_pool_7[a]->slot_size  = dump_slab_sizes[a];
+@@ -8349,10 +8317,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_8  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_8[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_8[a]->start_addr = bytes;
++        mem_slab_pool_8[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_8[a]->cur_addr   = mem_slab_pool_8[a]->start_addr;
+         mem_slab_pool_8[a]->used_slots = 0;
+         mem_slab_pool_8[a]->slot_size  = dump_slab_sizes[a];
+@@ -8362,10 +8327,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_9  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_9[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_9[a]->start_addr = bytes;
++        mem_slab_pool_9[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_9[a]->cur_addr   = mem_slab_pool_9[a]->start_addr;
+         mem_slab_pool_9[a]->used_slots = 0;
+         mem_slab_pool_9[a]->slot_size  = dump_slab_sizes[a];
+@@ -8375,10 +8337,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_10  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_10[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_10[a]->start_addr = bytes;
++        mem_slab_pool_10[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_10[a]->cur_addr   = mem_slab_pool_10[a]->start_addr;
+         mem_slab_pool_10[a]->used_slots = 0;
+         mem_slab_pool_10[a]->slot_size  = dump_slab_sizes[a];
+@@ -8388,10 +8347,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_11  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_11[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_11[a]->start_addr = bytes;
++        mem_slab_pool_11[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_11[a]->cur_addr   = mem_slab_pool_11[a]->start_addr;
+         mem_slab_pool_11[a]->used_slots = 0;
+         mem_slab_pool_11[a]->slot_size  = dump_slab_sizes[a];
+@@ -8401,10 +8357,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_12  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_12[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_12[a]->start_addr = bytes;
++        mem_slab_pool_12[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_12[a]->cur_addr   = mem_slab_pool_12[a]->start_addr;
+         mem_slab_pool_12[a]->used_slots = 0;
+         mem_slab_pool_12[a]->slot_size  = dump_slab_sizes[a];
+@@ -8414,10 +8367,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_13  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_13[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_13[a]->start_addr = bytes;
++        mem_slab_pool_13[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_13[a]->cur_addr   = mem_slab_pool_13[a]->start_addr;
+         mem_slab_pool_13[a]->used_slots = 0;
+         mem_slab_pool_13[a]->slot_size  = dump_slab_sizes[a];
+@@ -8427,10 +8377,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_14  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_14[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_14[a]->start_addr = bytes;
++        mem_slab_pool_14[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_14[a]->cur_addr   = mem_slab_pool_14[a]->start_addr;
+         mem_slab_pool_14[a]->used_slots = 0;
+         mem_slab_pool_14[a]->slot_size  = dump_slab_sizes[a];
+@@ -8440,10 +8387,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_15  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_15[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_15[a]->start_addr = bytes;
++        mem_slab_pool_15[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_15[a]->cur_addr   = mem_slab_pool_15[a]->start_addr;
+         mem_slab_pool_15[a]->used_slots = 0;
+         mem_slab_pool_15[a]->slot_size  = dump_slab_sizes[a];
+@@ -8453,10 +8397,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     mem_slab_pool_16  = (struct mem_slab**)malloc(dump_slab_num * sizeof(struct mem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool_16[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool_16[a]->start_addr = bytes;
++        mem_slab_pool_16[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool_16[a]->cur_addr   = mem_slab_pool_16[a]->start_addr;
+         mem_slab_pool_16[a]->used_slots = 0;
+         mem_slab_pool_16[a]->slot_size  = dump_slab_sizes[a];
+@@ -8470,10 +8411,7 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+     pmem_slab_pool = (struct pmem_slab**)malloc(dump_slab_num * sizeof(struct pmem_slab *));
+     for(int a = 0; a < dump_slab_num; a++){
+         mem_slab_pool[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+-        char* bytes=(char*)malloc(1024 * 1024 + align_size);
+-        unsigned long long int offset = align_size - PTR_ADDR(bytes)%align_size;
+-        bytes += offset;
+-        mem_slab_pool[a]->start_addr = bytes;
++        mem_slab_pool[a]->start_addr = (char*)malloc(1024 * 1024); // 16 threads;
+         mem_slab_pool[a]->cur_addr   = mem_slab_pool[a]->start_addr;
+         mem_slab_pool[a]->used_slots = 0;
+         mem_slab_pool[a]->slot_size  = dump_slab_sizes[a];
+@@ -8710,28 +8648,6 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+         retval = EXIT_FAILURE;
+     }
+ 
+-
+-    // /*
+-    // extern unsigned long long int network_io;
+-    // extern unsigned long long int hash_cal;
+-    // extern unsigned long long int hash_find;
+-    // extern unsigned long long int link_time;
+-    // extern unsigned long long int mem_access;
+-    // extern unsigned long long int command_parse;
+-    // extern unsigned long long int slab_alloc;
+-    // extern unsigned long long int lru_move;
+-    // */
+-    // printf("time analysis: \n");
+-    // printf("network io: %llu us\n", network_io);
+-    // printf("hash cal: %llu us\n", hash_cal);
+-    // printf("hash find: %llu us\n", hash_find);
+-    // printf("item link: %llu us\n", link_time);
+-    // printf("mem access: %llu us\n", mem_access);
+-    // printf("command parse: %llu us\n", command_parse);
+-    // printf("slab alloc: %llu us\n", slab_alloc);
+-    // printf("lru move: %llu us\n", lru_move);
+-
+-
+     stop_assoc_maintenance_thread();
+ 
+     /* remove the PID file if we're a daemon */
+@@ -8747,7 +8663,5 @@ fprintf(stderr, "pslab_size=%ld\n", pslab_size);
+ 
+     pthread_key_delete(key);
+ 
+-    
+-
+     return retval;
+ }
+diff --git a/memcached.h b/memcached.h
+index 4b84b95..109f649 100755
+--- a/memcached.h
++++ b/memcached.h
+@@ -109,7 +109,7 @@
+ #ifdef PSLAB
+ #define SLAB_GLOBAL_PAGE_POOL_PMEM 1 /* magic slab class for storing pmem pages for reassignment */
+ #endif
+-// #define CHUNK_ALIGN_BYTES 1
++// #define CHUNK_ALIGN_BYTES 2
+ #define CHUNK_ALIGN_BYTES 8
+ // #define CHUNK_ALIGN_BYTES 16
+ // #define CHUNK_ALIGN_BYTES 64
+@@ -211,26 +211,9 @@ extern long long int pslab_dslab_offset;
+ // extern char *pool_start;
+ 
+ 
+-extern unsigned long long int network_io;
+-extern unsigned long long int hash_cal;
+-extern unsigned long long int hash_find;
+-extern unsigned long long int link_time;
+-extern unsigned long long int mem_access;
+-extern unsigned long long int command_parse;
+-extern unsigned long long int slab_alloc;
+-extern unsigned long long int lru_move;
+ 
+ 
+-
+-struct mem_pair{
+-    char *dram_ptr;
+-    char *pmem_ptr;
+-};
+-
+-
+-extern unsigned long long int *simu_index;
+ extern char *simu_pslab_pool;
+-extern char *simu_dslab_pool;
+ extern char *simu_pslab_pool_file_path;
+ extern unsigned long long int simu_pslab_pool_size;
+ extern unsigned long long int simu_aligns;
+@@ -283,9 +266,6 @@ extern atomic_uint_fast8_t local;
+ extern pthread_key_t key;
+ 
+ 
+-// extern char **slabclass_slots;
+-
+-
+ enum conn_states {
+     conn_listening,  /**< the socket which listens for connections */
+     conn_new_cmd,    /**< Prepare connection for next command */
+@@ -888,7 +868,6 @@ conn *conn_from_freelist(void);
+ bool  conn_add_to_freelist(conn *c);
+ void  conn_close_idle(conn *c);
+ item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+-struct mem_pair *item_alloc_new(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+ #define DO_UPDATE true
+ #define DONT_UPDATE false
+ item *item_get(const char *key, const size_t nkey, conn *c, const bool do_update);
+diff --git a/pslab.c b/pslab.c
+index f699752..c6496f4 100755
+--- a/pslab.c
++++ b/pslab.c
+@@ -371,7 +371,6 @@ int pslab_create(char *pool_name, uint64_t pool_size, uint32_t slab_page_size, /
+     simu_pslab_pool_file_path = "/mnt/aep/simu_pool";
+     simu_pslab_pool_size = 32LL * 1024 * 1024 * 1024;
+     simu_aligns = 256;
+-    // simu_aligns = 64;
+     assert(simu_pslab_pool_size > (1024 * 1024));
+     simu_num_chunks = (simu_pslab_pool_size - (1024 * 1024)) / simu_aligns;
+ 
+@@ -388,14 +387,6 @@ int pslab_create(char *pool_name, uint64_t pool_size, uint32_t slab_page_size, /
+     simu_pslab_pool = (char*)ADDR_ALIGNED((unsigned long long int)simu_pslab_pool);
+     printf("Alig simu_pslab_pool %llu\n", (unsigned long long int)simu_pslab_pool);
+ 
+-    simu_dslab_pool = (char*)malloc(simu_pslab_pool_size);
+-    memset(simu_dslab_pool, 0, simu_pslab_pool_size);
+-    simu_dslab_pool = (char*)ADDR_ALIGNED((unsigned long long int)simu_dslab_pool);
+-
+-    simu_index = (unsigned long long int *)(malloc(sizeof(unsigned long long int) * 16));
+-    for(int i = 0; i < 16; i++){
+-        simu_index[i] = 0;
+-    }
+ 
+ 
+     ////printf("begin pslab_create function\n");
+diff --git a/recleanoptane.sh b/recleanoptane.sh
+new file mode 100755
+index 0000000..43d4be0
+--- /dev/null
++++ b/recleanoptane.sh
+@@ -0,0 +1,4 @@
++#!/bin/bash
++
++rm -rf /mnt/aep/pool
++rm -rf /mnt/aep/simu_pool
+diff --git a/remake.sh b/remake.sh
+new file mode 100755
+index 0000000..013947c
+--- /dev/null
++++ b/remake.sh
+@@ -0,0 +1,7 @@
++#!/bin/bash
++
++rm -rf /mnt/aep/pool
++rm -rf /mnt/aep/simu_pool
++
++make clean
++make
+diff --git a/slabs.c b/slabs.c
+index 494797b..e2938ca 100755
+--- a/slabs.c
++++ b/slabs.c
+@@ -355,13 +355,15 @@ void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, unsigned
+ 
+ void *get_pmem_page(unsigned int id){
+     // printf("get pmem page function call\n");
+-    // unsigned long long int cached_size = slabclass[id].perslab;
+ 
+-    unsigned long long int cached_size = 1;
++    int cls_id = id- 2;
++    unsigned long long int size = mem_slab_pool[cls_id]->slot_size;
++    unsigned long long int cached_size = settings.slab_page_size / size;
++    // unsigned long long int cached_size = 1024;
++    // unsigned long long int cached_size = 1;
+ 
+     pthread_mutex_lock(&slabs_lock_copy);
+ 
+-    int cls_id = id - 2;
+ 
+     if(pmem_slab_pool[cls_id]->cur_addr == NULL || (pmem_slab_pool[cls_id]->used_slots + cached_size > pmem_slab_pool[cls_id]->total_slots)){
+ 
+@@ -457,7 +459,6 @@ static int do_slabs_newslab(const unsigned int id) {
+     return 1;
+ }
+ 
+-
+ #ifdef PSLAB
+ int do_slabs_renewslab(const unsigned int id, char *ptr) {
+     slabclass_t *p = &slabclass[id];
+@@ -586,7 +587,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
+         return NULL;
+     }
+     p = &slabclass[id];
+-    // assert(p->sl_curr == 0 || ((item *)p->slots)->slabs_clsid == 0);
++    assert(p->sl_curr == 0 || ((item *)p->slots)->slabs_clsid == 0);
+     if (total_bytes != NULL) {
+         *total_bytes = p->requested;
+     }
+@@ -604,7 +605,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
+         // printf("After call do_slabs_newslab, Item Stat in do_slabs_alloc\n");
+         // print_item_stat(it);
+ 
+-        p->slots = it->next; // 关键在于不要再读取it->next的指针了
++        p->slots = it->next;
+         if (it->next) it->next->prev = 0;
+         it->it_flags &= ~ITEM_SLABBED;
+         it->refcount = 1;
+@@ -631,10 +632,6 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
+     return ret;
+ }
+ 
+-
+-/*@null@*/
+-
+-
+ void do_slab_realloc(item *it, unsigned int id) {
+     ////printf("do_slab_realloc function call\n");
+     slabclass_t *p = &slabclass[id];
+@@ -968,20 +965,12 @@ void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
+         unsigned int flags) {
+     // printf("slabs_alloc function call\n");
+     void *ret;
+-    pthread_mutex_lock(&slabs_lock);
+-    ret = do_slabs_alloc(size, id, total_bytes, flags);
+-    pthread_mutex_unlock(&slabs_lock);
+-    return ret;
+-}
+-
+-
+-
+-struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags){
+-    
+-    struct mem_pair *ret = (struct mem_pair *)malloc(sizeof(struct mem_pair));
+ 
+     int cls_id = id - 2;
+-    unsigned long long int cached_size = 1; 
++    unsigned long long int cached_size = settings.slab_page_size / size;
++    // unsigned long long int cached_size =1024;
++    // unsigned long long int cached_size = 1;
++
+     int thread_id = *((int*)pthread_getspecific(key));
+ 
+     struct mem_slab **cur_mem_slab;
+@@ -1039,9 +1028,10 @@ struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t *t
+             break;
+     }
+ 
+-    
++    // pthread_mutex_lock(&slabs_lock);
++    // ret = do_slabs_alloc(size, id, total_bytes, flags);
+ 
+-    ret->dram_ptr = cur_mem_slab[cls_id]->cur_addr;
++    ret = cur_mem_slab[cls_id]->cur_addr;
+     cur_mem_slab[cls_id]->cur_addr   = cur_mem_slab[cls_id]->cur_addr + cur_mem_slab[cls_id]->slot_size;
+     cur_mem_slab[cls_id]->used_slots = cur_mem_slab[cls_id]->used_slots + 1;
+ 
+@@ -1051,15 +1041,18 @@ struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t *t
+         cur_mem_slab[cls_id]->used_slots = 0;
+     }
+ 
+-    pthread_mutex_lock(&slabs_lock);
+-    ret->pmem_ptr = do_slabs_alloc(size, id, total_bytes, flags);
+-    pthread_mutex_unlock(&slabs_lock);
++
++    // pthread_mutex_unlock(&slabs_lock);
+     return ret;
+ }
+ 
+ 
+ 
+ 
++
++
++
++
+ void slabs_free(void *ptr, size_t size, unsigned int id) {
+     pthread_mutex_lock(&slabs_lock);
+     do_slabs_free(ptr, size, id);
+diff --git a/slabs.h b/slabs.h
+index 4d4e8ef..5ab2cb6 100755
+--- a/slabs.h
++++ b/slabs.h
+@@ -40,7 +40,10 @@ void flush_to_optane_pm(void *ptr, int id, unsigned long long int size, unsigned
+ 
+ void *get_pmem_page(unsigned int id);
+ 
+-
++struct mem_pair{
++    char *dram_ptr;
++    char *pmem_ptr;
++};
+ 
+ /**
+  * Given object size, return id to use when allocating/freeing memory for object
+@@ -53,7 +56,7 @@ unsigned int slabs_clsid(const size_t size);
+ #define SLABS_ALLOC_NO_NEWPAGE 1
+ void *slabs_alloc(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
+ 
+-struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
++// struct mem_pair *slabs_alloc_new(const size_t size, unsigned int id, uint64_t *total_bytes, unsigned int flags);
+ 
+ /** Free previously allocated object */
+ void slabs_free(void *ptr, size_t size, unsigned int id);
+diff --git a/thread.c b/thread.c
+index c5cf8da..51ec9bc 100755
+--- a/thread.c
++++ b/thread.c
+@@ -557,15 +557,11 @@ void sidethread_conn_close(conn *c) {
+ item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
+     //    printf("item_alloc function call\n");
+     item *it;
++    /* do_item_alloc handles its own locks */
+     it = do_item_alloc(key, nkey, flags, exptime, nbytes);
+     return it;
+ }
+ 
+-struct mem_pair *item_alloc_new(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes){
+-    struct mem_pair *dram_pmem = do_item_alloc_new(key, nkey, flags, exptime, nbytes);
+-    return dram_pmem;
+-}
+-
+ /*
+  * Returns an item if it hasn't been marked as expired,
+  * lazy-expiring as needed.
+@@ -661,13 +657,8 @@ enum delta_result_type add_delta(conn *c, const char *key,
+ enum store_item_type store_item(item *item, int comm, conn* c) {
+     enum store_item_type ret;
+     uint32_t hv;
+-    
+-    // struct timeval start, end;
+-    // gettimeofday(&start, NULL);
++
+     hv = hash(ITEM_key(item), item->nkey);
+-    // gettimeofday(&end, NULL);
+-    // hash_cal = hash_cal + (1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec);
+-        
+     item_lock(hv);
+     ret = do_store_item(item, comm, c, hv);
+     item_unlock(hv);

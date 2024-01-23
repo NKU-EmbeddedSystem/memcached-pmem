@@ -42,10 +42,10 @@ void flush_to_optane_pm(void *ptr, int id, unsigned long long int size,
 
 void *get_pmem_page(unsigned int id);
 
-struct mem_pair {
-  char *dram_ptr;
-  char *pmem_ptr;
-};
+/* struct mem_pair { */
+/*   char *dram_ptr; */
+/*   char *pmem_ptr; */
+/* }; */
 
 /**
  * Given object size, return id to use when allocating/freeing memory for object
