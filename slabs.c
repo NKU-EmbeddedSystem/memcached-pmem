@@ -1001,6 +1001,8 @@ void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
       cur_mem_slab[cls_id]->cur_addr + cur_mem_slab[cls_id]->slot_size;
   cur_mem_slab[cls_id]->used_slots = cur_mem_slab[cls_id]->used_slots + 1;
 
+  // full should be blocked?
+  // no, current thread cannot write before the last request return
   if (cur_mem_slab[cls_id]->used_slots == cached_size) {
     cur_mem_slab[cls_id]->cur_addr = cur_mem_slab[cls_id]->start_addr;
     cur_mem_slab[cls_id]->used_slots = 0;

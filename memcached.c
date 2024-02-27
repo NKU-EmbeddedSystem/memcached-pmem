@@ -8226,7 +8226,7 @@ int main(int argc, char **argv) {
   }
 
   const char *name = "my_shared_memory";
-  const size_t SIZE = 16 * 1024 * 1024;
+  const size_t SIZE = 16 * settings.slab_page_size; // num_threads * PAGE_SIZE
   int shm_fd = shm_open(name, O_CREAT | O_RDWR, 0666);
   // 配置共享内存大小
   int ret = ftruncate(shm_fd, SIZE);
@@ -8247,7 +8247,8 @@ int main(int argc, char **argv) {
         (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
     for (int a = 0; a < dump_slab_num; a++) {
       mem_slab_pools[i][a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-      mem_slab_pools[i][a]->start_addr = ptr + i * 1024 * 1024; // 16 threads;
+      mem_slab_pools[i][a]->start_addr =
+          ptr + i * settings.slab_page_size; // 16 threads;
       mem_slab_pools[i][a]->cur_addr = mem_slab_pools[i][a]->start_addr;
       mem_slab_pools[i][a]->used_slots = 0;
       mem_slab_pools[i][a]->slot_size = dump_slab_sizes[a];
