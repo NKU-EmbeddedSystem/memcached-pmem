@@ -8225,13 +8225,29 @@ int main(int argc, char **argv) {
     fprintf(stderr, "slabs sizes dump failed\n");
   }
 
+  const char *name = "my_shared_memory";
+  const size_t SIZE = 16 * 1024 * 1024;
+  int shm_fd = shm_open(name, O_CREAT | O_RDWR, 0666);
+  // 配置共享内存大小
+  int ret = ftruncate(shm_fd, SIZE);
+  if (ret != 0) {
+    perror("In ftruncate()");
+    exit(1);
+  }
+
+  // 映射共享内存对象
+  char *ptr = mmap(0, SIZE, PROT_WRITE, MAP_SHARED, shm_fd, 0);
+  if (ptr == MAP_FAILED) {
+    perror("In mmap()");
+    exit(1);
+  }
+
   for (int i = 0; i < 16; ++i) {
     mem_slab_pools[i] =
         (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
     for (int a = 0; a < dump_slab_num; a++) {
       mem_slab_pools[i][a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-      mem_slab_pools[i][a]->start_addr =
-          (char *)malloc(1024 * 1024); // 16 threads;
+      mem_slab_pools[i][a]->start_addr = ptr + i * 1024 * 1024; // 16 threads;
       mem_slab_pools[i][a]->cur_addr = mem_slab_pools[i][a]->start_addr;
       mem_slab_pools[i][a]->used_slots = 0;
       mem_slab_pools[i][a]->slot_size = dump_slab_sizes[a];
