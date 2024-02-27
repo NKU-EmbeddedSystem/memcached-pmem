@@ -987,58 +987,10 @@ void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
   int thread_id = *((int *)pthread_getspecific(key));
 
   struct mem_slab **cur_mem_slab;
-  switch (thread_id) {
-  case 0:
-    cur_mem_slab = mem_slab_pool_1;
-    break;
-  case 1:
-    cur_mem_slab = mem_slab_pool_2;
-    break;
-  case 2:
-    cur_mem_slab = mem_slab_pool_3;
-    break;
-  case 3:
-    cur_mem_slab = mem_slab_pool_4;
-    break;
-  case 4:
-    cur_mem_slab = mem_slab_pool_5;
-    break;
-  case 5:
-    cur_mem_slab = mem_slab_pool_6;
-    break;
-  case 6:
-    cur_mem_slab = mem_slab_pool_7;
-    break;
-  case 7:
-    cur_mem_slab = mem_slab_pool_8;
-    break;
-  case 8:
-    cur_mem_slab = mem_slab_pool_9;
-    break;
-  case 9:
-    cur_mem_slab = mem_slab_pool_10;
-    break;
-  case 10:
-    cur_mem_slab = mem_slab_pool_11;
-    break;
-  case 11:
-    cur_mem_slab = mem_slab_pool_12;
-    break;
-  case 12:
-    cur_mem_slab = mem_slab_pool_13;
-    break;
-  case 13:
-    cur_mem_slab = mem_slab_pool_14;
-    break;
-  case 14:
-    cur_mem_slab = mem_slab_pool_15;
-    break;
-  case 15:
-    cur_mem_slab = mem_slab_pool_16;
-    break;
-  default:
+  if (thread_id > 15 || thread_id < 0) {
     cur_mem_slab = mem_slab_pool;
-    break;
+  } else {
+    cur_mem_slab = mem_slab_pools[thread_id];
   }
 
   // pthread_mutex_lock(&slabs_lock);

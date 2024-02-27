@@ -110,22 +110,22 @@ unsigned long long int simu_cycles;
 
 unsigned long long int pmem_pool_index;
 
-struct mem_slab **mem_slab_pool_1;
-struct mem_slab **mem_slab_pool_2;
-struct mem_slab **mem_slab_pool_3;
-struct mem_slab **mem_slab_pool_4;
-struct mem_slab **mem_slab_pool_5;
-struct mem_slab **mem_slab_pool_6;
-struct mem_slab **mem_slab_pool_7;
-struct mem_slab **mem_slab_pool_8;
-struct mem_slab **mem_slab_pool_9;
-struct mem_slab **mem_slab_pool_10;
-struct mem_slab **mem_slab_pool_11;
-struct mem_slab **mem_slab_pool_12;
-struct mem_slab **mem_slab_pool_13;
-struct mem_slab **mem_slab_pool_14;
-struct mem_slab **mem_slab_pool_15;
-struct mem_slab **mem_slab_pool_16;
+struct mem_slab **mem_slab_pools[16];
+// struct mem_slab **mem_slab_pool_2;
+// struct mem_slab **mem_slab_pool_3;
+// struct mem_slab **mem_slab_pool_4;
+// struct mem_slab **mem_slab_pool_5;
+// struct mem_slab **mem_slab_pool_6;
+// struct mem_slab **mem_slab_pool_7;
+// struct mem_slab **mem_slab_pool_8;
+// struct mem_slab **mem_slab_pool_9;
+// struct mem_slab **mem_slab_pool_10;
+// struct mem_slab **mem_slab_pool_11;
+// struct mem_slab **mem_slab_pool_12;
+// struct mem_slab **mem_slab_pool_13;
+// struct mem_slab **mem_slab_pool_14;
+// struct mem_slab **mem_slab_pool_15;
+// struct mem_slab **mem_slab_pool_16;
 
 struct mem_slab **mem_slab_pool;
 struct pmem_slab **pmem_slab_pool;
@@ -1300,58 +1300,10 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
 
   int thread_id = *((int *)pthread_getspecific(key));
   struct mem_slab **cur_mem_slab;
-  switch (thread_id) {
-  case 0:
-    cur_mem_slab = mem_slab_pool_1;
-    break;
-  case 1:
-    cur_mem_slab = mem_slab_pool_2;
-    break;
-  case 2:
-    cur_mem_slab = mem_slab_pool_3;
-    break;
-  case 3:
-    cur_mem_slab = mem_slab_pool_4;
-    break;
-  case 4:
-    cur_mem_slab = mem_slab_pool_5;
-    break;
-  case 5:
-    cur_mem_slab = mem_slab_pool_6;
-    break;
-  case 6:
-    cur_mem_slab = mem_slab_pool_7;
-    break;
-  case 7:
-    cur_mem_slab = mem_slab_pool_8;
-    break;
-  case 8:
-    cur_mem_slab = mem_slab_pool_9;
-    break;
-  case 9:
-    cur_mem_slab = mem_slab_pool_10;
-    break;
-  case 10:
-    cur_mem_slab = mem_slab_pool_11;
-    break;
-  case 11:
-    cur_mem_slab = mem_slab_pool_12;
-    break;
-  case 12:
-    cur_mem_slab = mem_slab_pool_13;
-    break;
-  case 13:
-    cur_mem_slab = mem_slab_pool_14;
-    break;
-  case 14:
-    cur_mem_slab = mem_slab_pool_15;
-    break;
-  case 15:
-    cur_mem_slab = mem_slab_pool_16;
-    break;
-  default:
+  if (thread_id > 15 || thread_id < 0) {
     cur_mem_slab = mem_slab_pool;
-    break;
+  } else {
+    cur_mem_slab = mem_slab_pools[thread_id];
   }
 
   if (it == NULL || cur_mem_slab == NULL) {
@@ -8273,187 +8225,18 @@ int main(int argc, char **argv) {
     fprintf(stderr, "slabs sizes dump failed\n");
   }
 
-  mem_slab_pool_1 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_1[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_1[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_1[a]->cur_addr = mem_slab_pool_1[a]->start_addr;
-    mem_slab_pool_1[a]->used_slots = 0;
-    mem_slab_pool_1[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_1[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_2 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_2[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_2[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_2[a]->cur_addr = mem_slab_pool_2[a]->start_addr;
-    mem_slab_pool_2[a]->used_slots = 0;
-    mem_slab_pool_2[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_2[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_3 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_3[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_3[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_3[a]->cur_addr = mem_slab_pool_3[a]->start_addr;
-    mem_slab_pool_3[a]->used_slots = 0;
-    mem_slab_pool_3[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_3[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_4 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_4[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_4[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_4[a]->cur_addr = mem_slab_pool_4[a]->start_addr;
-    mem_slab_pool_4[a]->used_slots = 0;
-    mem_slab_pool_4[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_4[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_5 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_5[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_5[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_5[a]->cur_addr = mem_slab_pool_5[a]->start_addr;
-    mem_slab_pool_5[a]->used_slots = 0;
-    mem_slab_pool_5[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_5[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_6 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_6[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_6[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_6[a]->cur_addr = mem_slab_pool_6[a]->start_addr;
-    mem_slab_pool_6[a]->used_slots = 0;
-    mem_slab_pool_6[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_6[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_7 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_7[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_7[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_7[a]->cur_addr = mem_slab_pool_7[a]->start_addr;
-    mem_slab_pool_7[a]->used_slots = 0;
-    mem_slab_pool_7[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_7[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_8 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_8[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_8[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_8[a]->cur_addr = mem_slab_pool_8[a]->start_addr;
-    mem_slab_pool_8[a]->used_slots = 0;
-    mem_slab_pool_8[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_8[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_9 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_9[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_9[a]->start_addr = (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_9[a]->cur_addr = mem_slab_pool_9[a]->start_addr;
-    mem_slab_pool_9[a]->used_slots = 0;
-    mem_slab_pool_9[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_9[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_10 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_10[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_10[a]->start_addr =
-        (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_10[a]->cur_addr = mem_slab_pool_10[a]->start_addr;
-    mem_slab_pool_10[a]->used_slots = 0;
-    mem_slab_pool_10[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_10[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_11 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_11[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_11[a]->start_addr =
-        (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_11[a]->cur_addr = mem_slab_pool_11[a]->start_addr;
-    mem_slab_pool_11[a]->used_slots = 0;
-    mem_slab_pool_11[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_11[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_12 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_12[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_12[a]->start_addr =
-        (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_12[a]->cur_addr = mem_slab_pool_12[a]->start_addr;
-    mem_slab_pool_12[a]->used_slots = 0;
-    mem_slab_pool_12[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_12[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_13 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_13[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_13[a]->start_addr =
-        (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_13[a]->cur_addr = mem_slab_pool_13[a]->start_addr;
-    mem_slab_pool_13[a]->used_slots = 0;
-    mem_slab_pool_13[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_13[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_14 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_14[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_14[a]->start_addr =
-        (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_14[a]->cur_addr = mem_slab_pool_14[a]->start_addr;
-    mem_slab_pool_14[a]->used_slots = 0;
-    mem_slab_pool_14[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_14[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_15 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_15[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_15[a]->start_addr =
-        (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_15[a]->cur_addr = mem_slab_pool_15[a]->start_addr;
-    mem_slab_pool_15[a]->used_slots = 0;
-    mem_slab_pool_15[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_15[a]->need_flush = 0;
-  }
-
-  mem_slab_pool_16 =
-      (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
-  for (int a = 0; a < dump_slab_num; a++) {
-    mem_slab_pool_16[a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
-    mem_slab_pool_16[a]->start_addr =
-        (char *)malloc(1024 * 1024); // 16 threads;
-    mem_slab_pool_16[a]->cur_addr = mem_slab_pool_16[a]->start_addr;
-    mem_slab_pool_16[a]->used_slots = 0;
-    mem_slab_pool_16[a]->slot_size = dump_slab_sizes[a];
-    mem_slab_pool_16[a]->need_flush = 0;
+  for (int i = 0; i < 16; ++i) {
+    mem_slab_pools[i] =
+        (struct mem_slab **)malloc(dump_slab_num * sizeof(struct mem_slab *));
+    for (int a = 0; a < dump_slab_num; a++) {
+      mem_slab_pools[i][a] = (struct mem_slab *)malloc(sizeof(struct mem_slab));
+      mem_slab_pools[i][a]->start_addr =
+          (char *)malloc(1024 * 1024); // 16 threads;
+      mem_slab_pools[i][a]->cur_addr = mem_slab_pools[i][a]->start_addr;
+      mem_slab_pools[i][a]->used_slots = 0;
+      mem_slab_pools[i][a]->slot_size = dump_slab_sizes[a];
+      mem_slab_pools[i][a]->need_flush = 0;
+    }
   }
 
   mem_slab_pool =

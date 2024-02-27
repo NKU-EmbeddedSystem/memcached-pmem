@@ -239,22 +239,23 @@ struct pmem_slab {
   unsigned long long int total_slots;
 };
 
-extern struct mem_slab **mem_slab_pool_1;
-extern struct mem_slab **mem_slab_pool_2;
-extern struct mem_slab **mem_slab_pool_3;
-extern struct mem_slab **mem_slab_pool_4;
-extern struct mem_slab **mem_slab_pool_5;
-extern struct mem_slab **mem_slab_pool_6;
-extern struct mem_slab **mem_slab_pool_7;
-extern struct mem_slab **mem_slab_pool_8;
-extern struct mem_slab **mem_slab_pool_9;
-extern struct mem_slab **mem_slab_pool_10;
-extern struct mem_slab **mem_slab_pool_11;
-extern struct mem_slab **mem_slab_pool_12;
-extern struct mem_slab **mem_slab_pool_13;
-extern struct mem_slab **mem_slab_pool_14;
-extern struct mem_slab **mem_slab_pool_15;
-extern struct mem_slab **mem_slab_pool_16;
+/* extern struct mem_slab **mem_slab_pool_1; */
+/* extern struct mem_slab **mem_slab_pool_2; */
+/* extern struct mem_slab **mem_slab_pool_3; */
+/* extern struct mem_slab **mem_slab_pool_4; */
+/* extern struct mem_slab **mem_slab_pool_5; */
+/* extern struct mem_slab **mem_slab_pool_6; */
+/* extern struct mem_slab **mem_slab_pool_7; */
+/* extern struct mem_slab **mem_slab_pool_8; */
+/* extern struct mem_slab **mem_slab_pool_9; */
+/* extern struct mem_slab **mem_slab_pool_10; */
+/* extern struct mem_slab **mem_slab_pool_11; */
+/* extern struct mem_slab **mem_slab_pool_12; */
+/* extern struct mem_slab **mem_slab_pool_13; */
+/* extern struct mem_slab **mem_slab_pool_14; */
+/* extern struct mem_slab **mem_slab_pool_15; */
+/* extern struct mem_slab **mem_slab_pool_16; */
+extern struct mem_slab **mem_slab_pools[16];
 
 extern struct mem_slab **mem_slab_pool;
 extern struct pmem_slab **pmem_slab_pool;
