@@ -358,6 +358,7 @@ static void settings_init(void) {
   settings.binding_protocol = negotiating_prot;
   settings.item_size_max = 1024 * 1024;  /* The famous 1MB upper limit. */
   settings.slab_page_size = 1024 * 1024; /* chunks are split from 1MB pages. */
+  settings.slab_threshold_size = 1024 * 1024;
   settings.slab_chunk_size_max = settings.slab_page_size / 2;
   settings.sasl = false;
   settings.maxconns_fast = true;
@@ -7228,6 +7229,7 @@ int main(int argc, char **argv) {
                     "X"   /* Disable dump commands */
                     "o:"  /* Extended generic options */
                     "G:"  /* slab page size(DRAM buffer size)*/
+                    "T:"  // slab write back threshold size
       ;
 
   /* process arguments */
@@ -7297,6 +7299,9 @@ int main(int argc, char **argv) {
       break;
     case 'G':
       settings.slab_page_size = settings.slab_page_size * atoi(optarg);
+      break;
+    case 'T':
+      settings.slab_threshold_size = 1024 * atoi(optarg);
       break;
     case 'M':
       settings.evict_to_free = 0;
