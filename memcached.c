@@ -1291,63 +1291,62 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
     }
   }
 
-  int id = it->slabs_clsid;
-
-  int cls_id = it->slabs_clsid - 2;
-  unsigned long long int size = mem_slab_pool[cls_id]->slot_size;
-  unsigned long long int cached_size = settings.slab_page_size / size;
-  // unsigned long long int cached_size = 1024;
-  // unsigned long long int cached_size = 1;
-
-  int thread_id = *((int *)pthread_getspecific(key));
-  struct mem_slab **cur_mem_slab;
-  if (thread_id > 15 || thread_id < 0) {
-    cur_mem_slab = mem_slab_pool;
-  } else {
-    cur_mem_slab = mem_slab_pools[thread_id];
-  }
-
-  if (it == NULL || cur_mem_slab == NULL) {
-    printf("Pointer error!\n");
-  }
-  unsigned long long int cur_slot =
-      ((char *)it - (char *)(cur_mem_slab[cls_id]->start_addr)) /
-          cur_mem_slab[cls_id]->slot_size +
-      1;
-  if (cur_slot == cached_size) {
-    // flush to persistent memory;
-    // char *pm_ptr = get_pmem_page(SLAB_GLOBAL_PAGE_POOL_PMEM);
-    char *pm_ptr = get_pmem_page(id);
-    if (pm_ptr == NULL) {
-      printf("can not get pmem memory\n");
-      exit(0);
-    }
-    pslab_use_slab(pm_ptr, id, size);
-    // printf("the pmem address is %llu\n", (unsigned long long int)pm_ptr);
-    pmem_memcpy_persist(pm_ptr, (char *)(cur_mem_slab[cls_id]->start_addr),
-                        size * cached_size);
-    // printf("begin store item\n");
-    // link to hash table and lru list, inc refcount;
-    char *ptr = pm_ptr;
-    for (int i = 0; i < cached_size;
-         i++, ptr += (cur_mem_slab[cls_id]->slot_size)) {
-      item *cur_item = (item *)ptr;
-      ret = store_item(cur_item, comm, c);
-      item_remove(cur_item);
-    }
-    // printf("end store item\n");
-
-    // update mem_slab_pool
-    // mem_slab_pool[cls_id]->cur_addr   = mem_slab_pool[cls_id]->start_addr;
-    // mem_slab_pool[cls_id]->used_slots = 0;
-    // mem_slab_pool[cls_id]->need_flush = 0;
-    // printf("here, pthread_id is: %llu, need to flush is:%d\n", (unsigned long
-    // long int)pthread_self(), (int)mem_slab_pool[cls_id]->need_flush);
-  }
-
   if (!is_valid) {
     out_string(c, "CLIENT_ERROR bad data chunk");
   } else {
+    int id = it->slabs_clsid;
+
+    int cls_id = it->slabs_clsid - 2;
+    unsigned long long int size = mem_slab_pool[cls_id]->slot_size;
+    unsigned long long int cached_size = settings.slab_page_size / size;
+    // unsigned long long int cached_size = 1024;
+    // unsigned long long int cached_size = 1;
+
+    int thread_id = *((int *)pthread_getspecific(key));
+    struct mem_slab **cur_mem_slab;
+    if (thread_id > 15 || thread_id < 0) {
+      cur_mem_slab = mem_slab_pool;
+    } else {
+      cur_mem_slab = mem_slab_pools[thread_id];
+    }
+
+    if (it == NULL || cur_mem_slab == NULL) {
+      printf("Pointer error!\n");
+    }
+    unsigned long long int cur_slot =
+        ((char *)it - (char *)(cur_mem_slab[cls_id]->start_addr)) /
+            cur_mem_slab[cls_id]->slot_size +
+        1;
+    if (cur_slot == cached_size) {
+      // flush to persistent memory;
+      // char *pm_ptr = get_pmem_page(SLAB_GLOBAL_PAGE_POOL_PMEM);
+      char *pm_ptr = get_pmem_page(id);
+      if (pm_ptr == NULL) {
+        printf("can not get pmem memory\n");
+        exit(0);
+      }
+      pslab_use_slab(pm_ptr, id, size);
+      // printf("the pmem address is %llu\n", (unsigned long long int)pm_ptr);
+      pmem_memcpy_persist(pm_ptr, (char *)(cur_mem_slab[cls_id]->start_addr),
+                          size * cached_size);
+      // printf("begin store item\n");
+      // link to hash table and lru list, inc refcount;
+      char *ptr = pm_ptr;
+      for (int i = 0; i < cached_size;
+           i++, ptr += (cur_mem_slab[cls_id]->slot_size)) {
+        item *cur_item = (item *)ptr;
+        ret = store_item(cur_item, comm, c);
+        item_remove(cur_item);
+      }
+      // printf("end store item\n");
+
+      // update mem_slab_pool
+      // mem_slab_pool[cls_id]->cur_addr   = mem_slab_pool[cls_id]->start_addr;
+      // mem_slab_pool[cls_id]->used_slots = 0;
+      // mem_slab_pool[cls_id]->need_flush = 0;
+      // printf("here, pthread_id is: %llu, need to flush is:%d\n", (unsigned
+      // long long int)pthread_self(), (int)mem_slab_pool[cls_id]->need_flush);
+    }
     //   ret = store_item(it, comm, c);
     ret = STORED;
     // refcount 变成 2
