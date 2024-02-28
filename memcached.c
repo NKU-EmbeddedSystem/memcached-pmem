@@ -1299,8 +1299,9 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
     int cls_id = it->slabs_clsid - 2;
     unsigned long long int slot_size = mem_slab_pool[cls_id]->slot_size;
     unsigned int wb_slots = settings.slab_threshold_size / slot_size;
-    unsigned long long int full_slots =
-        wb_slots * settings.slab_page_size / settings.slab_threshold_size;
+    unsigned long long int full_slots = (unsigned long long)wb_slots *
+                                        settings.slab_page_size /
+                                        settings.slab_threshold_size;
     // unsigned long long int cached_size = 1024;
     // unsigned long long int cached_size = 1;
 
