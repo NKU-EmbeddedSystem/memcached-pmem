@@ -1242,7 +1242,6 @@ static void out_of_memory(conn *c, char *ascii_error) {
 }
 
 __thread char *pm_ptr;
-__thread int cur_slot;
 /*
  * we get here after reading the value in set/add/replace commands. The command
  * has been stored in c->cmd, and the item is ready in c->item.
@@ -1302,7 +1301,6 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
     unsigned int wb_slots = settings.slab_threshold_size / slot_size;
     unsigned long long int full_slots =
         wb_slots * settings.slab_page_size / settings.slab_threshold_size;
-    unsigned int written_count = cur_slot / wb_slots;
     // unsigned long long int cached_size = 1024;
     // unsigned long long int cached_size = 1;
 
@@ -1317,6 +1315,10 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
     if (it == NULL || cur_mem_slab == NULL) {
       printf("Pointer error!\n");
     }
+    unsigned long long int cur_slot =
+        ((char *)it - (char *)(cur_mem_slab[cls_id]->start_addr)) /
+        cur_mem_slab[cls_id]->slot_size;
+    unsigned int written_count = cur_slot / wb_slots;
 
     if ((cur_slot + 1) % wb_slots == 0) {
       // flush to persistent memory;
@@ -1328,7 +1330,7 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
       } else {
         pm_ptr += settings.slab_threshold_size;
       }
-      fprintf(stderr, "the pmem address is %p\n", (void *)pm_ptr);
+      /* fprintf(stderr, "the pmem address is %p\n", (void *)pm_ptr); */
       pmem_memcpy_persist(pm_ptr,
                           (char *)(cur_mem_slab[cls_id]->start_addr) +
                               written_count * settings.slab_threshold_size,
@@ -1342,6 +1344,10 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
         ret = store_item(cur_item, comm, c);
         item_remove(cur_item);
       }
+
+      if (cur_slot + 1 == full_slots) {
+        pm_ptr = NULL;
+      }
       // printf("end store item\n");
 
       // update mem_slab_pool
@@ -1351,9 +1357,6 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
       // printf("here, pthread_id is: %llu, need to flush is:%d\n", (unsigned
       // long long int)pthread_self(), (int)mem_slab_pool[cls_id]->need_flush);
     }
-    ++cur_slot;
-    if (cur_slot == full_slots)
-      cur_slot = 0;
     //   ret = store_item(it, comm, c);
     ret = STORED;
     // refcount 变成 2

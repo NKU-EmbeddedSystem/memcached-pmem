@@ -980,9 +980,6 @@ void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
   void *ret;
 
   int cls_id = id - 2;
-  unsigned int per_wb_slots = settings.slab_threshold_size / size;
-  unsigned long long int cached_slots =
-      per_wb_slots * settings.slab_page_size / settings.slab_threshold_size;
   // unsigned long long int cached_size =1024;
   // unsigned long long int cached_size = 1;
 
@@ -998,6 +995,11 @@ void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
   // pthread_mutex_lock(&slabs_lock);
   // ret = do_slabs_alloc(size, id, total_bytes, flags);
 
+  unsigned int per_wb_slots =
+      settings.slab_threshold_size / cur_mem_slab[cls_id]->slot_size;
+  unsigned long long int cached_slots = (unsigned long long)per_wb_slots *
+                                        settings.slab_page_size /
+                                        settings.slab_threshold_size;
   // left a space for fixed size write back
   ret = cur_mem_slab[cls_id]->cur_addr;
   ++cur_mem_slab[cls_id]->used_slots;
