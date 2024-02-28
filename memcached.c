@@ -1322,11 +1322,12 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
       // flush to persistent memory;
       // char *pm_ptr = get_pmem_page(SLAB_GLOBAL_PAGE_POOL_PMEM);
       // get pm_ptr when it is the first write back location
-      if (cur_slot == wb_slots - 1)
+      if (cur_slot == wb_slots - 1) {
         pm_ptr = get_pmem_page(id);
-      else
+        pslab_use_slab(pm_ptr, id, settings.slab_page_size);
+      } else {
         pm_ptr += settings.slab_threshold_size;
-      pslab_use_slab(pm_ptr, id, settings.slab_page_size);
+      }
       fprintf(stderr, "the pmem address is %p\n", (void *)pm_ptr);
       pmem_memcpy_persist(pm_ptr,
                           (char *)(cur_mem_slab[cls_id]->start_addr) +
