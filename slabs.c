@@ -980,7 +980,9 @@ void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
   void *ret;
 
   int cls_id = id - 2;
-  unsigned long long int cached_size = settings.slab_page_size / size;
+  unsigned int per_wb_slots = settings.slab_threshold_size / size;
+  unsigned long long int cached_slots =
+      per_wb_slots * settings.slab_page_size / settings.slab_threshold_size;
   // unsigned long long int cached_size =1024;
   // unsigned long long int cached_size = 1;
 
@@ -996,14 +998,22 @@ void *slabs_alloc(size_t size, unsigned int id, uint64_t *total_bytes,
   // pthread_mutex_lock(&slabs_lock);
   // ret = do_slabs_alloc(size, id, total_bytes, flags);
 
+  // left a space for fixed size write back
   ret = cur_mem_slab[cls_id]->cur_addr;
-  cur_mem_slab[cls_id]->cur_addr =
-      cur_mem_slab[cls_id]->cur_addr + cur_mem_slab[cls_id]->slot_size;
-  cur_mem_slab[cls_id]->used_slots = cur_mem_slab[cls_id]->used_slots + 1;
+  ++cur_mem_slab[cls_id]->used_slots;
+  int used_slots = cur_mem_slab[cls_id]->used_slots;
+  if (used_slots % per_wb_slots == 0) {
+    int wbs = used_slots / per_wb_slots;
+    cur_mem_slab[cls_id]->cur_addr =
+        cur_mem_slab[cls_id]->start_addr + wbs * settings.slab_threshold_size;
+  } else {
+    cur_mem_slab[cls_id]->cur_addr =
+        cur_mem_slab[cls_id]->cur_addr + cur_mem_slab[cls_id]->slot_size;
+  }
 
   // full should be blocked?
   // no, current thread cannot write before the last request return
-  if (cur_mem_slab[cls_id]->used_slots == cached_size) {
+  if (used_slots == cached_slots) {
     cur_mem_slab[cls_id]->cur_addr = cur_mem_slab[cls_id]->start_addr;
     cur_mem_slab[cls_id]->used_slots = 0;
   }

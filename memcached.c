@@ -1320,6 +1320,7 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
     if (cur_slot == cached_size) {
       // flush to persistent memory;
       // char *pm_ptr = get_pmem_page(SLAB_GLOBAL_PAGE_POOL_PMEM);
+      // get pm_ptr when it is the first write back location
       char *pm_ptr = get_pmem_page(id);
       if (pm_ptr == NULL) {
         printf("can not get pmem memory\n");
