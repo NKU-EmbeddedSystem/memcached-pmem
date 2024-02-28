@@ -1321,10 +1321,10 @@ static void complete_nread_ascii(conn *c) { // 核心操作, link的核心操作
       printf("can not get pmem memory\n");
       exit(0);
     }
+    pslab_use_slab(pm_ptr, id, size);
     // printf("the pmem address is %llu\n", (unsigned long long int)pm_ptr);
     pmem_memcpy_persist(pm_ptr, (char *)(cur_mem_slab[cls_id]->start_addr),
                         size * cached_size);
-    pslab_use_slab(pm_ptr, id, size);
     // printf("begin store item\n");
     // link to hash table and lru list, inc refcount;
     char *ptr = pm_ptr;
